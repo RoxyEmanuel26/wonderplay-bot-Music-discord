@@ -35,7 +35,10 @@ const messageCreateEvent: Event<'messageCreate'> = {
 
     if (!commandName) return;
 
-    const command = client.commands.get(commandName);
+    let command = client.commands.get(commandName);
+    if (!command) {
+      command = client.commands.find((cmd) => cmd.aliases && cmd.aliases.includes(commandName));
+    }
     if (!command) return;
 
     // Sistem Cooldown (Mencegah Spam Prefix)

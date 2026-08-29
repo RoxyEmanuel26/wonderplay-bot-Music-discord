@@ -32,6 +32,7 @@ const playlistCommand: Command = {
         .setDescription('Memutar sebuah playlist.')
         .addStringOption(option => option.setName('name').setDescription('Nama playlist yang ingin diputar.').setRequired(true))
     ),
+  aliases: ['pl'],
   execute: async (ctx: Context, client) => {
     const subcommand = ctx.isInteraction ? ctx.interaction!.options.getSubcommand() : ctx.args[0];
     if (!subcommand) {

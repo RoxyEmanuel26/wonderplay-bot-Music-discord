@@ -24,6 +24,7 @@ const favoriteCommand: Command = {
         .setName('play')
         .setDescription('Memutar seluruh lagu di daftar favoritmu.')
     ),
+  aliases: ['fav'],
   execute: async (ctx: Context, client) => {
     const subcommand = ctx.isInteraction ? ctx.interaction!.options.getSubcommand() : ctx.args[0];
     if (!subcommand) {

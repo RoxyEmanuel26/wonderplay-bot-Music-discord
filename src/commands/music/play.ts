@@ -15,6 +15,7 @@ const playCommand: Command = {
         .setRequired(true)
         .setAutocomplete(true)
     ),
+  aliases: ['p'],
   autocomplete: async (interaction: AutocompleteInteraction, client) => {
     const focusedValue = interaction.options.getFocused();
     if (!focusedValue) return await interaction.respond([]);

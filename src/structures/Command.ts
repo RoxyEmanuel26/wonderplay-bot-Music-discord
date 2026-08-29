@@ -14,6 +14,7 @@ export interface Command {
     | SlashCommandSubcommandsOnlyBuilder
     | SlashCommandOptionsOnlyBuilder
     | Omit<SlashCommandBuilder, 'addSubcommand' | 'addSubcommandGroup'>;
+  aliases?: string[];
   execute: (ctx: Context, client: AureliaClient) => Promise<void>;
   autocomplete?: (interaction: AutocompleteInteraction, client: AureliaClient) => Promise<void>;
 }

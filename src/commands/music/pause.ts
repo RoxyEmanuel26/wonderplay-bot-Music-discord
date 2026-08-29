@@ -8,6 +8,7 @@ const pauseCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('pause')
     .setDescription('Menjeda lagu yang sedang diputar.'),
+  aliases: ['pa'],
   execute: async (ctx: Context, client) => {
     if (!(await hasDJPermissions(ctx.interaction || ctx.message as any))) {
       await ctx.reply({ embeds: [createErrorEmbed('Kamu membutuhkan role DJ untuk menggunakan perintah ini.')], ephemeral: true });

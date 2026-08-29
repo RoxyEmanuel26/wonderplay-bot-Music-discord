@@ -50,7 +50,7 @@ export class AureliaClient extends Client {
     });
 
     this.shoukaku.on('ready', (name) => logger.info(`Lavalink Node: ${name} is now connected`));
-    this.shoukaku.on('error', (name, error) => logger.error(error, `Lavalink Node: ${name} emitted an error.`));
+    this.shoukaku.on('error', (name, error) => logger.warn(`Lavalink Node: ${name} gagal tersambung atau error: ${error.message}`));
     this.shoukaku.on('close', (name, code, reason) => logger.warn(`Lavalink Node: ${name} closed with code ${code}. Reason: ${reason || 'No reason'}`));
     this.shoukaku.on('disconnect', (name, count) => logger.warn(`Lavalink Node: ${name} disconnected. Count: ${count}`));
   }

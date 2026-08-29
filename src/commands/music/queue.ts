@@ -8,6 +8,7 @@ const queueCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('queue')
     .setDescription('Melihat daftar antrean lagu saat ini.'),
+  aliases: ['q'],
   execute: async (ctx: Context, client) => {
     const queue = client.queues.get(ctx.guildId!);
     if (!queue || !queue.current) {

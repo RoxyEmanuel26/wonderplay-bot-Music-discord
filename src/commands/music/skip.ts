@@ -8,6 +8,7 @@ const skipCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('skip')
     .setDescription('Melewati lagu yang sedang diputar.'),
+  aliases: ['s'],
   execute: async (ctx: Context, client) => {
     if (!(await hasDJPermissions(ctx.interaction || ctx.message as any))) {
       await ctx.reply({ embeds: [createErrorEmbed('Kamu membutuhkan role DJ untuk menggunakan perintah ini.')], ephemeral: true });

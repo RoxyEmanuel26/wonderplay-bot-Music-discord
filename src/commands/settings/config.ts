@@ -38,6 +38,7 @@ const configCommand: Command = {
             )
         )
     ),
+  aliases: ['cfg', 'setting'],
   execute: async (ctx: Context) => {
     // Check Admin Permissions
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

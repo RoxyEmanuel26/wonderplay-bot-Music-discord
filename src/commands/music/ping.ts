@@ -7,6 +7,7 @@ const pingCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('ping')
     .setDescription('Mengecek status, uptime, dan latency sistem (Healthcheck)'),
+  aliases: ['pg'],
   execute: async (ctx: Context, client) => {
     const wsPing = client.ws.ping;
     const uptime = process.uptime();

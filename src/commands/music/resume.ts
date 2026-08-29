@@ -8,6 +8,7 @@ const resumeCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('resume')
     .setDescription('Melanjutkan lagu yang sedang dijeda.'),
+  aliases: ['r', 'res'],
   execute: async (ctx: Context, client) => {
     if (!(await hasDJPermissions(ctx.interaction || ctx.message as any))) {
       await ctx.reply({ embeds: [createErrorEmbed('Kamu membutuhkan role DJ untuk menggunakan perintah ini.')], ephemeral: true });

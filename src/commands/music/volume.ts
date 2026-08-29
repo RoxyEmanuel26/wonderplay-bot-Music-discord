@@ -15,6 +15,7 @@ const volumeCommand: Command = {
         .setMinValue(1)
         .setMaxValue(200)
     ),
+  aliases: ['v'],
   execute: async (ctx: Context, client) => {
     if (!(await hasDJPermissions(ctx.interaction || ctx.message as any))) {
       await ctx.reply({ embeds: [createErrorEmbed('Kamu membutuhkan role DJ untuk menggunakan perintah ini.')], ephemeral: true });
