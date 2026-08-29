@@ -1,4 +1,5 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
+import {  SlashCommandBuilder, EmbedBuilder  } from 'discord.js';
+import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
 import { createErrorEmbed } from '../../utils/embeds';
 import { createProgressBar, formatDuration } from '../../utils/progressbar';
@@ -7,11 +8,11 @@ const npCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('np')
     .setDescription('Menampilkan lagu yang sedang diputar saat ini beserta durasinya.'),
-  execute: async (interaction: ChatInputCommandInteraction, client) => {
-    const queue = client.queues.get(interaction.guildId!);
+  execute: async (ctx: Context, client) => {
+    const queue = client.queues.get(ctx.guildId!);
     
     if (!queue || !queue.current) {
-      await interaction.reply({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar.')], ephemeral: true });
+      await ctx.reply({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar.')], ephemeral: true });
       return;
     }
 
@@ -29,7 +30,7 @@ const npCommand: Command = {
       .setThumbnail(currentTrack.info.artworkUrl || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&q=80&w=256&h=256')
       .setFooter({ text: `Volume: ${queue.player.filters.volume ? Math.round(queue.player.filters.volume * 100) : 100}% | Loop: ${queue.loop}` });
 
-    await interaction.reply({ embeds: [embed] });
+    await ctx.reply({ embeds: [embed] });
   },
 };
 

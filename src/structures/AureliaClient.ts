@@ -17,6 +17,7 @@ export class AureliaClient extends Client {
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildVoiceStates,
         GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
       ],
     });
   }
@@ -29,11 +30,16 @@ export class AureliaClient extends Client {
   }
 
   private initShoukaku() {
+    const lavaHost = process.env.LAVALINK_HOST || 'localhost';
+    const lavaPort = process.env.LAVALINK_PORT || '2333';
+    const lavaUrl = process.env.LAVALINK_URL || `${lavaHost}:${lavaPort}`;
+
     const nodes = [
       {
         name: 'LocalNode',
-        url: process.env.LAVALINK_URL || 'localhost:2333',
+        url: lavaUrl,
         auth: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
+        secure: lavaPort === '443',
       },
     ];
 

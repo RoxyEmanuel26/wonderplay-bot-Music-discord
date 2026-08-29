@@ -101,7 +101,7 @@ export class Queue {
       .setTitle('🎶 Now Playing')
       .setDescription(`[**${this.current.info.title}**](${this.current.info.uri || ''})\n\n👤 Author: ${this.current.info.author}\n${timeString}`)
       .setThumbnail(this.current.info.artworkUrl || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&q=80&w=256&h=256')
-      .setFooter({ text: 'AURELIA Premium Audio Engine' });
+      .setFooter({ text: 'Aurelia Music Engine' });
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder().setCustomId('btn_pause').setEmoji('⏯️').setStyle(ButtonStyle.Secondary),

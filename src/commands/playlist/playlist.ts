@@ -1,4 +1,5 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, TextChannel } from 'discord.js';
+import {  SlashCommandBuilder, TextChannel  } from 'discord.js';
+import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
 import { db } from '../../database/db';
 import { createSuccessEmbed, createErrorEmbed } from '../../utils/embeds';
@@ -31,45 +32,51 @@ const playlistCommand: Command = {
         .setDescription('Memutar sebuah playlist.')
         .addStringOption(option => option.setName('name').setDescription('Nama playlist yang ingin diputar.').setRequired(true))
     ),
-  execute: async (interaction: ChatInputCommandInteraction, client) => {
-    const subcommand = interaction.options.getSubcommand();
-    await interaction.deferReply();
+  execute: async (ctx: Context, client) => {
+    const subcommand = ctx.isInteraction ? ctx.interaction!.options.getSubcommand() : ctx.args[0];
+    if (!subcommand) {
+      await ctx.reply({ embeds: [createErrorEmbed('Mohon pilih aksi: `create`, `list`, `add`, atau `play`.')], ephemeral: true });
+      return;
+    }
+    await ctx.deferReply();
 
     if (subcommand === 'create') {
-      const name = interaction.options.getString('name', true);
-      const existing = await db.playlist.findFirst({ where: { userId: interaction.user.id, name } });
+      const name = ctx.isInteraction ? ctx.interaction!.options.getString('name', true) : ctx.args.slice(1).join(' ');
+      if (!name) return;
+      const existing = await db.playlist.findFirst({ where: { userId: ctx.author.id, name } });
       if (existing) {
-        await interaction.followUp({ embeds: [createErrorEmbed(`Playlist **${name}** sudah ada.`)] });
+        await ctx.followUp({ embeds: [createErrorEmbed(`Playlist **${name}** sudah ada.`)] });
         return;
       }
 
       await db.playlist.create({
-        data: { userId: interaction.user.id, name },
+        data: { userId: ctx.author.id, name },
       });
-      await interaction.followUp({ embeds: [createSuccessEmbed(`Playlist **${name}** berhasil dibuat!`)] });
+      await ctx.followUp({ embeds: [createSuccessEmbed(`Playlist **${name}** berhasil dibuat!`)] });
       return;
 
     } else if (subcommand === 'list') {
-      const playlists = await db.playlist.findMany({ where: { userId: interaction.user.id } });
+      const playlists = await db.playlist.findMany({ where: { userId: ctx.author.id } });
       if (playlists.length === 0) {
-        await interaction.followUp({ embeds: [createErrorEmbed('Kamu belum memiliki playlist apapun.')] });
+        await ctx.followUp({ embeds: [createErrorEmbed('Kamu belum memiliki playlist apapun.')] });
         return;
       }
       const desc = playlists.map(p => `**${p.name}** - ${p.tracks.length} lagu`).join('\n');
-      await interaction.followUp({ embeds: [createSuccessEmbed(`**Daftar Playlist-mu:**\n${desc}`)] });
+      await ctx.followUp({ embeds: [createSuccessEmbed(`**Daftar Playlist-mu:**\n${desc}`)] });
       return;
 
     } else if (subcommand === 'add') {
-      const name = interaction.options.getString('name', true);
-      const queue = client.queues.get(interaction.guildId!);
+      const name = ctx.isInteraction ? ctx.interaction!.options.getString('name', true) : ctx.args.slice(1).join(' ');
+      if (!name) return;
+      const queue = client.queues.get(ctx.guildId!);
       if (!queue || !queue.current) {
-        await interaction.followUp({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar.')] });
+        await ctx.followUp({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar.')] });
         return;
       }
 
-      const playlist = await db.playlist.findFirst({ where: { userId: interaction.user.id, name } });
+      const playlist = await db.playlist.findFirst({ where: { userId: ctx.author.id, name } });
       if (!playlist) {
-        await interaction.followUp({ embeds: [createErrorEmbed(`Playlist **${name}** tidak ditemukan.`)] });
+        await ctx.followUp({ embeds: [createErrorEmbed(`Playlist **${name}** tidak ditemukan.`)] });
         return;
       }
 
@@ -78,41 +85,42 @@ const playlistCommand: Command = {
         where: { id: playlist.id },
         data: { tracks: { push: trackUri } },
       });
-      await interaction.followUp({ embeds: [createSuccessEmbed(`Berhasil menambahkan **${queue.current.info.title}** ke playlist **${name}**.`)] });
+      await ctx.followUp({ embeds: [createSuccessEmbed(`Berhasil menambahkan **${queue.current.info.title}** ke playlist **${name}**.`)] });
       return;
 
     } else if (subcommand === 'play') {
-      const name = interaction.options.getString('name', true);
-      const playlist = await db.playlist.findFirst({ where: { userId: interaction.user.id, name } });
+      const name = ctx.isInteraction ? ctx.interaction!.options.getString('name', true) : ctx.args.slice(1).join(' ');
+      if (!name) return;
+      const playlist = await db.playlist.findFirst({ where: { userId: ctx.author.id, name } });
       
       if (!playlist || playlist.tracks.length === 0) {
-        await interaction.followUp({ embeds: [createErrorEmbed(`Playlist **${name}** tidak ditemukan atau kosong.`)] });
+        await ctx.followUp({ embeds: [createErrorEmbed(`Playlist **${name}** tidak ditemukan atau kosong.`)] });
         return;
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const member = interaction.member as any;
+      const member = ctx.member as any;
       const voiceChannel = member?.voice?.channel;
       if (!voiceChannel) {
-        await interaction.followUp({ embeds: [createErrorEmbed('Kamu harus berada di voice channel terlebih dahulu!')] });
+        await ctx.followUp({ embeds: [createErrorEmbed('Kamu harus berada di voice channel terlebih dahulu!')] });
         return;
       }
 
       const node = client.shoukaku.getIdealNode();
       if (!node) {
-        await interaction.followUp({ embeds: [createErrorEmbed('Tidak ada node Lavalink yang tersedia saat ini.')] });
+        await ctx.followUp({ embeds: [createErrorEmbed('Tidak ada node Lavalink yang tersedia saat ini.')] });
         return;
       }
 
-      let queue = client.queues.get(interaction.guildId!);
+      let queue = client.queues.get(ctx.guildId!);
       if (!queue) {
         const player = await client.shoukaku.joinVoiceChannel({
-          guildId: interaction.guildId!,
+          guildId: ctx.guildId!,
           channelId: voiceChannel.id,
           shardId: 0,
         });
-        queue = new Queue(client, player, interaction.channel as TextChannel, interaction.guildId!);
-        client.queues.set(interaction.guildId!, queue);
+        queue = new Queue(client, player, ctx.channel as TextChannel, ctx.guildId!);
+        client.queues.set(ctx.guildId!, queue);
       }
 
       let loaded = 0;
@@ -127,7 +135,7 @@ const playlistCommand: Command = {
         }
       }
 
-      await interaction.followUp({ embeds: [createSuccessEmbed(`Berhasil memuat **${loaded}** lagu dari playlist **${name}** ke antrean!`)] });
+      await ctx.followUp({ embeds: [createSuccessEmbed(`Berhasil memuat **${loaded}** lagu dari playlist **${name}** ke antrean!`)] });
     }
   },
 };

@@ -1,4 +1,5 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
+import {  SlashCommandBuilder,   } from 'discord.js';
+import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
 import { createSuccessEmbed } from '../../utils/embeds';
 
@@ -6,7 +7,7 @@ const pingCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('ping')
     .setDescription('Mengecek status, uptime, dan latency sistem (Healthcheck)'),
-  execute: async (interaction: ChatInputCommandInteraction, client) => {
+  execute: async (ctx: Context, client) => {
     const wsPing = client.ws.ping;
     const uptime = process.uptime();
     
@@ -21,7 +22,7 @@ const pingCommand: Command = {
         { name: '🎵 Lavalink Nodes', value: nodeStatus, inline: false }
       );
 
-    await interaction.reply({ embeds: [embed] });
+    await ctx.reply({ embeds: [embed] });
   },
 };
 

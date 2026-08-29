@@ -9,8 +9,11 @@ import { db } from '../database/db';
 export async function hasDJPermissions(interaction: ChatInputCommandInteraction | ButtonInteraction): Promise<boolean> {
   if (!interaction.guildId || !interaction.member) return false;
 
-  // Cek admin permission via properti memberPermissions bawaan
-  if (interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator)) {
+  // Cek admin permission via properti memberPermissions (Slash) atau member.permissions (Prefix)
+  const isSlashAdmin = interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
+  const isPrefixAdmin = ('permissions' in interaction.member) && typeof (interaction.member as any).permissions?.has === 'function' && (interaction.member as any).permissions.has(PermissionsBitField.Flags.Administrator);
+
+  if (isSlashAdmin || isPrefixAdmin) {
     return true;
   }
 

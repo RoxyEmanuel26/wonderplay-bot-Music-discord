@@ -6,6 +6,7 @@ import {
   AutocompleteInteraction,
 } from 'discord.js';
 import { AureliaClient } from './AureliaClient';
+import { Context } from './Context';
 
 export interface Command {
   data:
@@ -13,6 +14,6 @@ export interface Command {
     | SlashCommandSubcommandsOnlyBuilder
     | SlashCommandOptionsOnlyBuilder
     | Omit<SlashCommandBuilder, 'addSubcommand' | 'addSubcommandGroup'>;
-  execute: (interaction: ChatInputCommandInteraction, client: AureliaClient) => Promise<void>;
+  execute: (ctx: Context, client: AureliaClient) => Promise<void>;
   autocomplete?: (interaction: AutocompleteInteraction, client: AureliaClient) => Promise<void>;
 }

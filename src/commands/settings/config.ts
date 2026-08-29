@@ -1,5 +1,9 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits } from 'discord.js';
+import {  SlashCommandBuilder, PermissionFlagsBits  } from 'discord.js';
+import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
+import { createErrorEmbed } from '../../utils/embeds';
+import { PermissionsBitField } from 'discord.js';
+import { Language } from '../../utils/i18n'; '../../structures/Command';
 import { createSuccessEmbed } from '../../utils/embeds';
 import { db } from '../../database/db';
 
@@ -34,35 +38,72 @@ const configCommand: Command = {
             )
         )
     ),
-  execute: async (interaction: ChatInputCommandInteraction, _client) => {
-    const subcommand = interaction.options.getSubcommand();
-    
-    await interaction.deferReply();
+  execute: async (ctx: Context) => {
+    // Check Admin Permissions
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const member = ctx.member as any;
+    if (ctx.isInteraction && ctx.interaction!.memberPermissions && !ctx.interaction!.memberPermissions.has(PermissionsBitField.Flags.Administrator)) {
+      await ctx.reply({ embeds: [createErrorEmbed('Hanya Administrator yang dapat menggunakan perintah ini.')], ephemeral: true });
+      return;
+    }
+    if (!ctx.isInteraction && !member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
+      await ctx.reply({ embeds: [createErrorEmbed('Hanya Administrator yang dapat menggunakan perintah ini.')], ephemeral: true });
+      return;
+    }
+
+    const subcommand = ctx.isInteraction ? ctx.interaction!.options.getSubcommand() : ctx.args[0];
 
     if (subcommand === 'djrole') {
-      const role = interaction.options.getRole('role', true);
+      let roleId = '';
+      if (ctx.isInteraction) {
+        const role = ctx.interaction!.options.getRole('role', true);
+        roleId = role.id;
+      } else {
+        const roleArg = ctx.args[1];
+        if (!roleArg) return;
+        roleId = roleArg.replace(/<@&|>/g, '');
+      }
+
       await db.guildSettings.upsert({
-        where: { guildId: interaction.guildId! },
-        create: { guildId: interaction.guildId!, djRoleId: role.id },
-        update: { djRoleId: role.id },
+        where: { guildId: ctx.guildId! },
+        update: { djRoleId: roleId },
+        create: { guildId: ctx.guildId!, djRoleId: roleId },
       });
-      await interaction.followUp({ embeds: [createSuccessEmbed(`Role DJ berhasil disetel ke <@&${role.id}>.`)] });
+      await ctx.reply({ embeds: [createSuccessEmbed(`Role DJ telah diatur ke <@&${roleId}>.`)] });
+
     } else if (subcommand === 'mode247') {
-      const enabled = interaction.options.getBoolean('enabled', true);
+      let enabled = false;
+      if (ctx.isInteraction) {
+        enabled = ctx.interaction!.options.getBoolean('enabled', true);
+      } else {
+        enabled = ctx.args[1] === 'true' || ctx.args[1] === 'on';
+      }
+
       await db.guildSettings.upsert({
-        where: { guildId: interaction.guildId! },
-        create: { guildId: interaction.guildId!, mode247: enabled },
+        where: { guildId: ctx.guildId! },
         update: { mode247: enabled },
+        create: { guildId: ctx.guildId!, mode247: enabled },
       });
-      await interaction.followUp({ embeds: [createSuccessEmbed(`Mode 24/7 berhasil ${enabled ? 'diaktifkan' : 'dimatikan'}.`)] });
+      await ctx.reply({ embeds: [createSuccessEmbed(`Mode 24/7 telah **${enabled ? 'Diaktifkan' : 'Dinonaktifkan'}**.`)] });
+      
     } else if (subcommand === 'language') {
-      const lang = interaction.options.getString('lang', true);
+      let langStr = '';
+      if (ctx.isInteraction) {
+        langStr = ctx.interaction!.options.getString('lang', true);
+      } else {
+        langStr = ctx.args[1];
+      }
+      
+      const lang = langStr as Language;
+      
       await db.guildSettings.upsert({
-        where: { guildId: interaction.guildId! },
-        create: { guildId: interaction.guildId!, language: lang },
+        where: { guildId: ctx.guildId! },
         update: { language: lang },
+        create: { guildId: ctx.guildId!, language: lang },
       });
-      await interaction.followUp({ embeds: [createSuccessEmbed(lang === 'en' ? 'Language successfully set to English.' : 'Bahasa berhasil disetel ke Indonesia.')] });
+      
+      const response = lang === 'id' ? 'Bahasa berhasil diubah ke **Indonesia**.' : 'Language successfully changed to **English**.';
+      await ctx.reply({ embeds: [createSuccessEmbed(response)] });
     }
   },
 };

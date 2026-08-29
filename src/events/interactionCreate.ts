@@ -1,5 +1,6 @@
 import { Events, Interaction } from 'discord.js';
 import { Event } from '../structures/Event';
+import { Context } from '../structures/Context';
 import { logger } from '../utils/logger';
 import { t, getLanguage, Language } from '../utils/i18n';
 
@@ -15,7 +16,8 @@ const interactionCreateEvent: Event<Events.InteractionCreate> = {
       }
 
       try {
-        await command.execute(interaction, client);
+        const ctx = new Context(interaction);
+        await command.execute(ctx, client);
       } catch (error) {
         logger.error(error, `Error executing ${interaction.commandName}`);
         

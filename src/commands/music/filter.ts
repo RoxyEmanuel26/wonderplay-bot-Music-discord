@@ -1,4 +1,5 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, StringSelectMenuBuilder, ActionRowBuilder, StringSelectMenuOptionBuilder, ComponentType } from 'discord.js';
+import {  SlashCommandBuilder, StringSelectMenuBuilder, ActionRowBuilder, StringSelectMenuOptionBuilder, ComponentType  } from 'discord.js';
+import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
 import { createErrorEmbed } from '../../utils/embeds';
 import { hasDJPermissions } from '../../utils/dj';
@@ -7,16 +8,16 @@ const filterCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('filter')
     .setDescription('Mengatur filter audio untuk lagu yang sedang diputar.'),
-  execute: async (interaction: ChatInputCommandInteraction, client) => {
-    if (!(await hasDJPermissions(interaction))) {
-      await interaction.reply({ embeds: [createErrorEmbed('Kamu membutuhkan role DJ untuk menggunakan perintah ini.')], ephemeral: true });
+  execute: async (ctx: Context, client) => {
+    if (!await hasDJPermissions(ctx.interaction || ctx.message as any)) {
+      await ctx.reply({ embeds: [createErrorEmbed('Kamu membutuhkan role DJ untuk menggunakan perintah ini.')], ephemeral: true });
       return;
     }
 
-    const queue = client.queues.get(interaction.guildId!);
+    const queue = client.queues.get(ctx.guildId!);
     
     if (!queue || !queue.current) {
-      await interaction.reply({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar.')], ephemeral: true });
+      await ctx.reply({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar.')], ephemeral: true });
       return;
     }
 
@@ -34,7 +35,7 @@ const filterCommand: Command = {
           .setValue('bassboost'),
         new StringSelectMenuOptionBuilder()
           .setLabel('Nightcore')
-          .setDescription('Mempercepat tempo dan pitch (suara tupai).')
+          .setDescription('Mempercepat tempo dan pitch (suara tupai: any).')
           .setValue('nightcore'),
         new StringSelectMenuOptionBuilder()
           .setLabel('Vaporwave')
@@ -48,7 +49,7 @@ const filterCommand: Command = {
 
     const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
 
-    const message = await interaction.reply({
+    const message = await ctx.reply({
       content: 'Silakan pilih filter audio:',
       components: [row],
       ephemeral: true,
@@ -57,7 +58,7 @@ const filterCommand: Command = {
 
     const collector = message.createMessageComponentCollector({ componentType: ComponentType.StringSelect, time: 60000 });
 
-    collector.on('collect', async (i) => {
+    collector.on('collect', async (i: any) => {
       const value = i.values[0];
       
       // Selalu clear filter lama sebelum menerapkan yang baru agar tidak bertumpuk

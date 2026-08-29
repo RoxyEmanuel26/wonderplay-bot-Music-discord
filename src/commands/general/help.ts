@@ -1,4 +1,5 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, StringSelectMenuBuilder, ActionRowBuilder, StringSelectMenuOptionBuilder, ComponentType } from 'discord.js';
+import {  SlashCommandBuilder, StringSelectMenuBuilder, ActionRowBuilder, StringSelectMenuOptionBuilder, ComponentType  } from 'discord.js';
+import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
 import { createBaseEmbed } from '../../utils/embeds';
 
@@ -6,11 +7,11 @@ const helpCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('help')
     .setDescription('Menampilkan pusat bantuan dan daftar perintah AURELIA.'),
-  execute: async (interaction: ChatInputCommandInteraction) => {
+  execute: async (ctx: Context) => {
     // Definisi Embed Beranda
     const homeEmbed = createBaseEmbed()
       .setTitle('✨ Pusat Bantuan AURELIA')
-      .setDescription('Selamat datang di **AURELIA** — Bot Musik Discord Premium (Rolls-Royce Edition).\nAURELIA dirancang untuk memberikan kualitas audio tanpa kompromi, antarmuka elegan, dan fitur lengkap untuk komunitas Anda.\n\nSilakan pilih kategori di menu bawah untuk melihat panduan fitur.')
+      .setDescription('Selamat datang di **Aurelia** — Bot Musik Resmi untuk server Wonderplay.\n\n💡 **Dukungan Hibrida:** Seluruh perintah di bawah ini dapat dipanggil menggunakan *Slash Command* (contoh: `/play`) MAUPUN menggunakan *Prefix* standar (contoh: `!play`).\n\nSilakan pilih kategori pada menu di bawah untuk melihat daftar perintah yang tersedia.')
       .addFields(
         { name: '🎵 Kualitas Audio', value: 'Didukung oleh Lavalink v4, menghadirkan audio sejernih kristal tanpa *lag*.' },
         { name: '🌍 Multi-Bahasa', value: 'Mendukung bahasa Indonesia & Inggris secara independen di tiap server.' },
@@ -30,7 +31,7 @@ const helpCommand: Command = {
         { name: '`/pause` & `/resume`', value: 'Menjeda atau melanjutkan lagu.' },
         { name: '`/skip` & `/stop`', value: 'Melompati lagu saat ini, atau menghentikan musik sepenuhnya.' },
         { name: '`/volume [1-200]`', value: 'Mengatur tingkat volume musik.' },
-        { name: '`/filter`', value: 'Menerapkan efek audio premium (Bassboost, Nightcore, Vaporwave, Karaoke).' }
+        { name: '`/filter`', value: 'Menerapkan efek audio (Bassboost, Nightcore, Vaporwave, Karaoke).' }
       );
 
     // Definisi Embed Playlist & Favorit
@@ -88,7 +89,7 @@ const helpCommand: Command = {
 
     const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
 
-    const message = await interaction.reply({
+    const message = await ctx.reply({
       embeds: [homeEmbed],
       components: [row],
       ephemeral: true, // Help command biasanya ephemeral agar tidak menuh-menuhin chat
@@ -97,7 +98,7 @@ const helpCommand: Command = {
 
     const collector = message.createMessageComponentCollector({ componentType: ComponentType.StringSelect, time: 300000 }); // 5 menit
 
-    collector.on('collect', async (i) => {
+    collector.on('collect', async (i: any) => {
       const value = i.values[0];
       
       let selectedEmbed = homeEmbed;
@@ -115,7 +116,7 @@ const helpCommand: Command = {
     collector.on('end', async () => {
       selectMenu.setDisabled(true);
       const disabledRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
-      await interaction.editReply({ components: [disabledRow] }).catch(() => {});
+      await ctx.editReply({ components: [disabledRow] }).catch(() => {});
     });
   },
 };

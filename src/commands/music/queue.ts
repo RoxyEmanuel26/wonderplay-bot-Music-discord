@@ -1,4 +1,5 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
+import {  SlashCommandBuilder, EmbedBuilder  } from 'discord.js';
+import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
 import { createErrorEmbed } from '../../utils/embeds';
 import { formatDuration } from '../../utils/progressbar';
@@ -7,10 +8,10 @@ const queueCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('queue')
     .setDescription('Melihat daftar antrean lagu saat ini.'),
-  execute: async (interaction: ChatInputCommandInteraction, client) => {
-    const queue = client.queues.get(interaction.guildId!);
+  execute: async (ctx: Context, client) => {
+    const queue = client.queues.get(ctx.guildId!);
     if (!queue || !queue.current) {
-      await interaction.reply({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar atau antrean kosong.')], ephemeral: true });
+      await ctx.reply({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar atau antrean kosong.')], ephemeral: true });
       return;
     }
 
@@ -30,12 +31,12 @@ const queueCommand: Command = {
     }
 
     const embed = new EmbedBuilder()
-      .setTitle(`📑 Antrean Lagu di ${interaction.guild?.name}`)
+      .setTitle(`📑 Antrean Lagu di ${ctx.guild?.name}`)
       .setDescription(description)
       .setColor('#D4AF37')
       .setFooter({ text: `Total Lagu: ${queue.tracks.length + 1} | Total Durasi: ${formatDuration(totalDuration)} | Loop: ${queue.loop}` });
 
-    await interaction.reply({ embeds: [embed] });
+    await ctx.reply({ embeds: [embed] });
   },
 };
 
