@@ -1,0 +1,53 @@
+services:
+  bot:
+    build: .
+    container_name: aurelia_bot
+    restart: always
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/aurelia?schema=public
+      - REDIS_URL=redis://redis:6379
+      - LAVALINK_HOST=lavalink
+    depends_on:
+      - postgres
+      - redis
+      - lavalink
+    ports:
+      - "3000:3000"
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: aurelia-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: aurelia
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: aurelia-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4
+    container_name: aurelia-lavalink
+    ports:
+      - "2333:2333"
+    environment:
+      - _JAVA_OPTIONS=-Xmx2G
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
