@@ -3,7 +3,9 @@ import { TextChannel, Message, ActionRowBuilder, ButtonBuilder, ButtonStyle, Com
 import { AureliaClient } from './AureliaClient';
 import { logger } from '../utils/logger';
 import { createBaseEmbed } from '../utils/embeds';
-import { formatDuration } from '../utils/progressbar';
+import { formatDuration, createProgressBar } from '../utils/progressbar';
+import { hasDJPermissions } from '../utils/dj';
+import { t, Language } from '../utils/i18n';
 
 export class Queue {
   public tracks: Track[] = [];
@@ -37,6 +39,11 @@ export class Queue {
       logger.warn('Lavalink Player Stuck');
       this.next();
     });
+
+    this.player.on('closed', () => {
+      logger.info(`Player closed for guild ${this.guildId}`);
+      this.client.queues.delete(this.guildId);
+    });
   }
 
   public enqueue(track: Track) {
@@ -49,16 +56,28 @@ export class Queue {
     if (this.current) return;
 
     if (this.tracks.length === 0) {
+      if (this.nowPlayingMessage) {
+        this.nowPlayingMessage.delete().catch(() => null);
+        this.nowPlayingMessage = null;
+      }
+
       setTimeout(async () => {
-        if (this.tracks.length > 0) return;
-        const { db } = await import('../database/db');
-        const settings = await db.guildSettings.findUnique({ where: { guildId: this.guildId } });
+        // Cek lagi apakah setelah 1 menit masih kosong
+        if (this.tracks.length > 0 || this.current) return;
         
-        if (!settings || !settings.mode247) {
-          this.stop();
-          this.client.shoukaku.leaveVoiceChannel(this.guildId);
-          this.client.queues.delete(this.guildId);
-          this.textChannel.send('👋 Antrean telah habis dan mode 24/7 nonaktif, keluar dari voice channel...');
+        try {
+          const { db } = await import('../database/db');
+          const settings = await db.guildSettings.findUnique({ where: { guildId: this.guildId } });
+          const lang = (settings?.language as Language) || 'id';
+          
+          if (!settings || !settings.mode247) {
+            this.stop();
+            this.client.shoukaku.leaveVoiceChannel(this.guildId);
+            this.client.queues.delete(this.guildId);
+            this.textChannel.send(t('autoLeave', lang));
+          }
+        } catch (e) {
+          logger.error(e, 'Failed to handle auto-leave');
         }
       }, 60000); // 1 menit idle
       return;
@@ -75,9 +94,12 @@ export class Queue {
   private async sendNowPlaying() {
     if (!this.current) return;
 
+    const progressBar = createProgressBar(0, this.current.info.length, 15);
+    const timeString = `\`00:00\` ${progressBar} \`${formatDuration(this.current.info.length)}\``;
+
     const embed = createBaseEmbed()
       .setTitle('🎶 Now Playing')
-      .setDescription(`[**${this.current.info.title}**](${this.current.info.uri || ''})\n\n👤 Author: ${this.current.info.author}\n⏱️ Duration: ${formatDuration(this.current.info.length)}`)
+      .setDescription(`[**${this.current.info.title}**](${this.current.info.uri || ''})\n\n👤 Author: ${this.current.info.author}\n${timeString}`)
       .setThumbnail(this.current.info.artworkUrl || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&q=80&w=256&h=256')
       .setFooter({ text: 'AURELIA Premium Audio Engine' });
 
@@ -103,12 +125,19 @@ export class Queue {
     const collector = message.createMessageComponentCollector({ componentType: ComponentType.Button, time: this.current?.info.length || 300000 });
 
     collector.on('collect', async (interaction) => {
+      const hasPermission = await hasDJPermissions(interaction);
+      if (!hasPermission) {
+        await interaction.reply({ content: '❌ Kamu membutuhkan role DJ untuk menggunakan tombol ini.', ephemeral: true });
+        return;
+      }
+
       await interaction.deferUpdate();
 
       if (interaction.customId === 'btn_pause') {
         this.player.setPaused(!this.player.paused);
+        await interaction.followUp({ content: `⏸️ Musik **${this.player.paused ? 'dijeda' : 'dilanjutkan'}**.`, ephemeral: true });
       } else if (interaction.customId === 'btn_skip') {
-        this.player.stopTrack();
+        this.skip();
       } else if (interaction.customId === 'btn_stop') {
         this.stop();
         this.client.shoukaku.leaveVoiceChannel(this.guildId);
@@ -129,6 +158,11 @@ export class Queue {
     
     this.current = null;
     this.play();
+  }
+
+  public skip() {
+    this.player.stopTrack();
+    this.next();
   }
 
   public stop() {

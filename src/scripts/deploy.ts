@@ -14,7 +14,7 @@ if (!token || !clientId) {
   process.exit(1);
 }
 
-const commands: any[] = [];
+const commands: unknown[] = [];
 const commandsPath = path.join(__dirname, '..', 'commands');
 
 if (fs.existsSync(commandsPath)) {
@@ -51,7 +51,7 @@ const rest = new REST().setToken(token);
     const data = await rest.put(
       Routes.applicationCommands(clientId),
       { body: commands },
-    ) as any[];
+    ) as unknown[];
 
     logger.info(`Successfully reloaded ${data.length} application (/) commands.`);
   } catch (error) {

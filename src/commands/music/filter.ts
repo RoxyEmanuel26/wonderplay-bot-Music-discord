@@ -1,12 +1,18 @@
 import { SlashCommandBuilder, ChatInputCommandInteraction, StringSelectMenuBuilder, ActionRowBuilder, StringSelectMenuOptionBuilder, ComponentType } from 'discord.js';
 import { Command } from '../../structures/Command';
-import { createSuccessEmbed, createErrorEmbed } from '../../utils/embeds';
+import { createErrorEmbed } from '../../utils/embeds';
+import { hasDJPermissions } from '../../utils/dj';
 
 const filterCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('filter')
     .setDescription('Mengatur filter audio untuk lagu yang sedang diputar.'),
   execute: async (interaction: ChatInputCommandInteraction, client) => {
+    if (!(await hasDJPermissions(interaction))) {
+      await interaction.reply({ embeds: [createErrorEmbed('Kamu membutuhkan role DJ untuk menggunakan perintah ini.')], ephemeral: true });
+      return;
+    }
+
     const queue = client.queues.get(interaction.guildId!);
     
     if (!queue || !queue.current) {
@@ -54,12 +60,15 @@ const filterCommand: Command = {
     collector.on('collect', async (i) => {
       const value = i.values[0];
       
+      // Selalu clear filter lama sebelum menerapkan yang baru agar tidak bertumpuk
+      await queue.player.clearFilters();
+
       switch (value) {
         case 'none':
-          queue.player.clearFilters();
+          // Sudah di-clear di atas
           break;
         case 'bassboost':
-          queue.player.setEqualizer([
+          await queue.player.setEqualizer([
             { band: 0, gain: 0.6 },
             { band: 1, gain: 0.67 },
             { band: 2, gain: 0.67 },
@@ -68,13 +77,13 @@ const filterCommand: Command = {
           ]);
           break;
         case 'nightcore':
-          queue.player.setTimescale({ speed: 1.2999999523162842, pitch: 1.2999999523162842, rate: 1.0 });
+          await queue.player.setTimescale({ speed: 1.2999999523162842, pitch: 1.2999999523162842, rate: 1.0 });
           break;
         case 'vaporwave':
-          queue.player.setTimescale({ speed: 0.8500000238418579, pitch: 0.800000011920929, rate: 1.0 });
+          await queue.player.setTimescale({ speed: 0.8500000238418579, pitch: 0.800000011920929, rate: 1.0 });
           break;
         case 'karaoke':
-          queue.player.setKaraoke({ level: 1.0, monoLevel: 1.0, filterBand: 220.0, filterWidth: 100.0 });
+          await queue.player.setKaraoke({ level: 1.0, monoLevel: 1.0, filterBand: 220.0, filterWidth: 100.0 });
           break;
       }
 

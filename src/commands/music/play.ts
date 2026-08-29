@@ -2,6 +2,7 @@ import { SlashCommandBuilder, ChatInputCommandInteraction, TextChannel, Autocomp
 import { Command } from '../../structures/Command';
 import { Queue } from '../../structures/Queue';
 import { createSuccessEmbed, createErrorEmbed } from '../../utils/embeds';
+import { t, getLanguage } from '../../utils/i18n';
 
 const playCommand: Command = {
   data: new SlashCommandBuilder()
@@ -17,7 +18,7 @@ const playCommand: Command = {
     const focusedValue = interaction.options.getFocused();
     if (!focusedValue) return await interaction.respond([]);
 
-    const node = client.shoukaku.options.nodeResolver(client.shoukaku.nodes);
+    const node = client.shoukaku.getIdealNode();
     if (!node) return await interaction.respond([]);
 
     try {
@@ -27,30 +28,31 @@ const playCommand: Command = {
       }
 
       const tracks = Array.isArray(result.data) ? result.data : [];
-      const choices = tracks.slice(0, 5).map(t => ({
-        name: `${t.info.title.slice(0, 80)} - ${t.info.author.slice(0, 15)}`,
-        value: t.info.uri || t.info.title,
+      const choices = tracks.slice(0, 5).map(tr => ({
+        name: `${tr.info.title.slice(0, 80)} - ${tr.info.author.slice(0, 15)}`,
+        value: tr.info.uri || tr.info.title,
       }));
       await interaction.respond(choices);
-    } catch (e) {
+    } catch {
       await interaction.respond([]);
     }
   },
   execute: async (interaction: ChatInputCommandInteraction, client) => {
     const query = interaction.options.getString('query', true);
+    const lang = await getLanguage(interaction.guildId!);
     
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const member = interaction.member as any;
     const voiceChannel = member?.voice?.channel;
 
     if (!voiceChannel) {
-      await interaction.reply({ embeds: [createErrorEmbed('Kamu harus berada di voice channel terlebih dahulu!')], ephemeral: true });
+      await interaction.reply({ embeds: [createErrorEmbed(t('noVoiceChannel', lang))], ephemeral: true });
       return;
     }
 
-    const node = client.shoukaku.options.nodeResolver(client.shoukaku.nodes);
+    const node = client.shoukaku.getIdealNode();
     if (!node) {
-      await interaction.reply({ embeds: [createErrorEmbed('Tidak ada node Lavalink yang tersedia saat ini.')], ephemeral: true });
+      await interaction.reply({ embeds: [createErrorEmbed(t('noNode', lang))], ephemeral: true });
       return;
     }
 
@@ -87,7 +89,7 @@ const playCommand: Command = {
     }
 
     queue.enqueue(track);
-    await interaction.followUp({ embeds: [createSuccessEmbed(`Ditambahkan ke antrean:\n**[${track.info.title}](${track.info.uri})**`)] });
+    await interaction.followUp({ embeds: [createSuccessEmbed(`${t('addedToQueue', lang)}:\n**[${track.info.title}](${track.info.uri})**`)] });
   },
 };
 

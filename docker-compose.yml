@@ -5,9 +5,11 @@ services:
     restart: always
     env_file: .env
     environment:
+      - NODE_ENV=production
       - DATABASE_URL=postgresql://postgres:password@postgres:5432/aurelia?schema=public
       - REDIS_URL=redis://redis:6379
-      - LAVALINK_HOST=lavalink
+      - LAVALINK_URL=lavalink:2333
+      - LAVALINK_PASSWORD=youshallnotpass
     depends_on:
       - postgres
       - redis

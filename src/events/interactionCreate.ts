@@ -1,6 +1,7 @@
 import { Events, Interaction } from 'discord.js';
 import { Event } from '../structures/Event';
 import { logger } from '../utils/logger';
+import { t, getLanguage, Language } from '../utils/i18n';
 
 const interactionCreateEvent: Event<Events.InteractionCreate> = {
   name: Events.InteractionCreate,
@@ -17,10 +18,18 @@ const interactionCreateEvent: Event<Events.InteractionCreate> = {
         await command.execute(interaction, client);
       } catch (error) {
         logger.error(error, `Error executing ${interaction.commandName}`);
+        
+        let lang: Language = 'id';
+        if (interaction.guildId) {
+          lang = await getLanguage(interaction.guildId);
+        }
+
+        const errorMsg = t('errorExecuting', lang);
+        
         if (interaction.replied || interaction.deferred) {
-          await interaction.followUp({ content: 'There was an error while executing this command!', flags: 'Ephemeral' });
+          await interaction.followUp({ content: errorMsg, ephemeral: true });
         } else {
-          await interaction.reply({ content: 'There was an error while executing this command!', flags: 'Ephemeral' });
+          await interaction.reply({ content: errorMsg, ephemeral: true });
         }
       }
     } else if (interaction.isAutocomplete()) {

@@ -37,7 +37,11 @@ export class AureliaClient extends Client {
       },
     ];
 
-    this.shoukaku = new Shoukaku(new Connectors.DiscordJS(this), nodes);
+    this.shoukaku = new Shoukaku(new Connectors.DiscordJS(this), nodes, {
+      resume: true,
+      resumeTimeout: 30000,
+      reconnectTries: 5,
+    });
 
     this.shoukaku.on('ready', (name) => logger.info(`Lavalink Node: ${name} is now connected`));
     this.shoukaku.on('error', (name, error) => logger.error(error, `Lavalink Node: ${name} emitted an error.`));

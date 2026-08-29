@@ -22,6 +22,18 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
+// Graceful shutdown
+const shutdown = async () => {
+  logger.info('Shutting down...');
+  client.destroy();
+  const { db } = await import('./database/db');
+  await db.$disconnect();
+  process.exit(0);
+};
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
 client.start(token).catch((err) => {
   logger.error(err, 'Failed to start client');
 });

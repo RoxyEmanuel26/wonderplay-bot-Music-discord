@@ -1,24 +1,41 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
 import { Command } from '../../structures/Command';
+import { createErrorEmbed } from '../../utils/embeds';
+import { formatDuration } from '../../utils/progressbar';
 
 const queueCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('queue')
-    .setDescription('Menampilkan antrean lagu saat ini.'),
+    .setDescription('Melihat daftar antrean lagu saat ini.'),
   execute: async (interaction: ChatInputCommandInteraction, client) => {
     const queue = client.queues.get(interaction.guildId!);
-    
-    if (!queue || (!queue.current && queue.tracks.length === 0)) {
-      await interaction.reply({ content: 'Antrean kosong.', ephemeral: true });
+    if (!queue || !queue.current) {
+      await interaction.reply({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar atau antrean kosong.')], ephemeral: true });
       return;
     }
 
-    const currentTitle = queue.current ? queue.current.info.title : 'None';
-    const upNext = queue.tracks.slice(0, 10).map((track, i) => `${i + 1}. ${track.info.title}`).join('\n');
-    
-    const response = `**Now Playing:**\n${currentTitle}\n\n**Up Next:**\n${upNext || 'Kosong'}\n\n*(Total antrean: ${queue.tracks.length})*`;
+    const currentTrack = queue.current;
+    const upcoming = queue.tracks.slice(0, 10);
+    const totalDuration = queue.tracks.reduce((acc, t) => acc + t.info.length, currentTrack.info.length);
 
-    await interaction.reply({ content: response });
+    let description = `**Sedang Diputar:**\n[${currentTrack.info.title}](${currentTrack.info.uri || ''}) | \`${formatDuration(currentTrack.info.length)}\`\n\n**Antrean Selanjutnya:**\n`;
+    
+    if (upcoming.length === 0) {
+      description += `*Tidak ada lagu berikutnya di antrean.*`;
+    } else {
+      description += upcoming.map((t, i) => `${i + 1}. [${t.info.title}](${t.info.uri || ''}) | \`${formatDuration(t.info.length)}\``).join('\n');
+      if (queue.tracks.length > 10) {
+        description += `\n*...dan ${queue.tracks.length - 10} lagu lainnya.*`;
+      }
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle(`📑 Antrean Lagu di ${interaction.guild?.name}`)
+      .setDescription(description)
+      .setColor('#D4AF37')
+      .setFooter({ text: `Total Lagu: ${queue.tracks.length + 1} | Total Durasi: ${formatDuration(totalDuration)} | Loop: ${queue.loop}` });
+
+    await interaction.reply({ embeds: [embed] });
   },
 };
 

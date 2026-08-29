@@ -3,10 +3,17 @@ import { Command } from '../../structures/Command';
 import { createSuccessEmbed, createErrorEmbed } from '../../utils/embeds';
 import { hasDJPermissions } from '../../utils/dj';
 
-const pauseCommand: Command = {
+const volumeCommand: Command = {
   data: new SlashCommandBuilder()
-    .setName('pause')
-    .setDescription('Menjeda lagu yang sedang diputar.'),
+    .setName('volume')
+    .setDescription('Mengatur volume musik (1-200).')
+    .addIntegerOption(option => 
+      option.setName('level')
+        .setDescription('Tingkat volume')
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(200)
+    ),
   execute: async (interaction: ChatInputCommandInteraction, client) => {
     if (!(await hasDJPermissions(interaction))) {
       await interaction.reply({ embeds: [createErrorEmbed('Kamu membutuhkan role DJ untuk menggunakan perintah ini.')], ephemeral: true });
@@ -20,14 +27,11 @@ const pauseCommand: Command = {
       return;
     }
 
-    if (queue.player.paused) {
-      await interaction.reply({ embeds: [createErrorEmbed('Musik sudah dalam keadaan dijeda.')], ephemeral: true });
-      return;
-    }
-
-    queue.player.setPaused(true);
-    await interaction.reply({ embeds: [createSuccessEmbed('⏸️ Musik berhasil dijeda.')] });
+    const level = interaction.options.getInteger('level', true);
+    queue.player.setGlobalVolume(level);
+    
+    await interaction.reply({ embeds: [createSuccessEmbed(`🔊 Volume diatur ke **${level}%**.`)] });
   },
 };
 
-export default pauseCommand;
+export default volumeCommand;

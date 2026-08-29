@@ -12,6 +12,7 @@ model GuildSettings {
   djRoleId  String?
   mode247   Boolean @default(false)
   prefix    String  @default("!")
+  language  String  @default("id")
 }
 
 model Playlist {
