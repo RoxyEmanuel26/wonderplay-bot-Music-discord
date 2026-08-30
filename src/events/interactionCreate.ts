@@ -4,6 +4,8 @@ import { Context } from '../structures/Context';
 import { logger } from '../utils/logger';
 import { t, getLanguage, Language } from '../utils/i18n';
 
+import { checkCooldown } from '../utils/cooldown';
+
 const interactionCreateEvent: Event<Events.InteractionCreate> = {
   name: Events.InteractionCreate,
   execute: async (interaction: Interaction, client) => {
@@ -12,6 +14,14 @@ const interactionCreateEvent: Event<Events.InteractionCreate> = {
 
       if (!command) {
         logger.warn(`No command matching ${interaction.commandName} was found.`);
+        return;
+      }
+
+      // Sistem Cooldown Redis (Mencegah Spam Slash Command)
+      const isSpamming = await checkCooldown(interaction.user.id, command.data.name, 3000);
+      if (isSpamming) {
+        // Balas sementara (ephemeral) jika terkena cooldown, lalu abaikan
+        await interaction.reply({ content: '⏳ Mohon tunggu sebentar sebelum menggunakan perintah ini lagi.', ephemeral: true });
         return;
       }
 

@@ -6,6 +6,7 @@ import { PermissionsBitField } from 'discord.js';
 import { Language } from '../../utils/i18n'; '../../structures/Command';
 import { createSuccessEmbed } from '../../utils/embeds';
 import { db } from '../../database/db';
+import { redis } from '../../database/redis';
 
 const configCommand: Command = {
   data: new SlashCommandBuilder()
@@ -103,6 +104,11 @@ const configCommand: Command = {
         create: { guildId: ctx.guildId!, language: lang },
       });
       
+      // Hapus cache lama di Redis agar sistem langsung menyesuaikan
+      try {
+        await redis.del(`guild_lang:${ctx.guildId!}`);
+      } catch (err) {}
+
       const response = lang === 'id' ? 'Bahasa berhasil diubah ke **Indonesia**.' : 'Language successfully changed to **English**.';
       await ctx.reply({ embeds: [createSuccessEmbed(response)] });
     }

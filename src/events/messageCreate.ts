@@ -4,10 +4,9 @@ import { logger } from '../utils/logger';
 import { Context } from '../structures/Context';
 import { t, getLanguage, Language } from '../utils/i18n';
 
-const PREFIX = process.env.PREFIX || '!';
+import { checkCooldown } from '../utils/cooldown';
 
-// Cooldown storage: Map<CommandName, Collection<UserId, Timestamp>>
-const cooldowns = new Collection<string, Collection<string, number>>();
+const PREFIX = process.env.PREFIX || '!';
 
 const messageCreateEvent: Event<'messageCreate'> = {
   name: 'messageCreate',
@@ -21,7 +20,6 @@ const messageCreateEvent: Event<'messageCreate'> = {
       const botPermissions = channel.permissionsFor(message.guild.members.me);
       
       if (!botPermissions || !botPermissions.has(PermissionsBitField.Flags.SendMessages)) {
-        // Jangan lakukan apa-apa jika bot bahkan tidak bisa mengirim pesan
         return;
       }
       if (!botPermissions.has(PermissionsBitField.Flags.EmbedLinks)) {
@@ -41,25 +39,9 @@ const messageCreateEvent: Event<'messageCreate'> = {
     }
     if (!command) return;
 
-    // Sistem Cooldown (Mencegah Spam Prefix)
-    if (!cooldowns.has(command.data.name)) {
-      cooldowns.set(command.data.name, new Collection());
-    }
-
-    const now = Date.now();
-    const timestamps = cooldowns.get(command.data.name)!;
-    const cooldownAmount = 3000; // 3 detik per command per user
-
-    if (timestamps.has(message.author.id)) {
-      const expirationTime = timestamps.get(message.author.id)! + cooldownAmount;
-      if (now < expirationTime) {
-        // Jangan spam balas, abaikan saja request spam tersebut
-        return;
-      }
-    }
-
-    timestamps.set(message.author.id, now);
-    setTimeout(() => timestamps.delete(message.author.id), cooldownAmount);
+    // Sistem Cooldown Redis (Mencegah Spam Prefix)
+    const isSpamming = await checkCooldown(message.author.id, command.data.name, 3000);
+    if (isSpamming) return; // Abaikan pesan spam
 
     const ctx = new Context(message, args);
 
