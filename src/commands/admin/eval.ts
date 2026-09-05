@@ -17,9 +17,9 @@ const evalCommand: Command = {
   execute: async (ctx: Context, _client) => {
     // Pastikan hanya owner bot yang bisa menjalankan ini (OWNER_ID atau OWNER_IDS dari .env)
     const envOwner = process.env.OWNER_IDS || process.env.OWNER_ID || '';
-    const ownerIds = envOwner.split(',').map(id => id.trim());
+    const ownerIds = envOwner.split(',').map(id => id.trim()).filter(Boolean);
     
-    if (!ownerIds.includes(ctx.author.id)) {
+    if (!envOwner || !ownerIds.includes(ctx.author.id)) {
       await ctx.reply({ embeds: [createErrorEmbed('Anda tidak memiliki izin untuk menggunakan perintah ini.')], ephemeral: true });
       return;
     }
@@ -38,6 +38,20 @@ const evalCommand: Command = {
         evaled = util.inspect(evaled, { depth: 1 });
       }
 
+      // Sanitasi variabel sensitif (.env) agar tidak bocor ke chat
+      const secrets = [
+        process.env.DISCORD_TOKEN,
+        process.env.LAVALINK_PASSWORD,
+        process.env.DATABASE_URL,
+        process.env.REDIS_URL,
+      ].filter(Boolean) as string[];
+
+      for (const secret of secrets) {
+        if (secret && evaled.includes(secret)) {
+          evaled = evaled.replaceAll(secret, '[REDACTED_SECRET]');
+        }
+      }
+
       // Pastikan output tidak melebihi limit 4000 karakter Discord
       if (evaled.length > 4000) {
         evaled = evaled.slice(0, 3995) + '...';
@@ -45,7 +59,14 @@ const evalCommand: Command = {
 
       await ctx.followUp({ embeds: [createSuccessEmbed(`**Output:**\n\`\`\`js\n${evaled}\n\`\`\``)] });
     } catch (e: unknown) {
-      const errString = e instanceof Error ? e.message : String(e);
+      let errString = e instanceof Error ? e.message : String(e);
+      const secrets = [process.env.DISCORD_TOKEN, process.env.LAVALINK_PASSWORD].filter(Boolean) as string[];
+      for (const secret of secrets) {
+        if (secret && errString.includes(secret)) {
+          errString = errString.replaceAll(secret, '[REDACTED_SECRET]');
+        }
+      }
+
       await ctx.followUp({
         embeds: [createErrorEmbed(`**Error:**\n\`\`\`js\n${errString.slice(0, 1000)}\n\`\`\``)],
       });

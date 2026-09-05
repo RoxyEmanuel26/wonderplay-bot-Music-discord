@@ -100,6 +100,10 @@ const helpCommand: Command = {
     const collector = message.createMessageComponentCollector({ componentType: ComponentType.StringSelect, time: 300000 }); // 5 menit
 
     collector.on('collect', async (i: any) => {
+      if (i.user.id !== ctx.author.id) {
+        await i.reply({ content: '❌ Hanya pemanggil perintah yang dapat menggunakan menu ini.', ephemeral: true });
+        return;
+      }
       const value = i.values[0];
       
       let selectedEmbed = homeEmbed;

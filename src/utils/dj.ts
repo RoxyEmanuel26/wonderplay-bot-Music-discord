@@ -1,5 +1,6 @@
 import { ChatInputCommandInteraction, ButtonInteraction, PermissionsBitField } from 'discord.js';
 import { db } from '../database/db';
+import { redis } from '../database/redis';
 
 /**
  * Mengecek apakah pengguna memiliki izin DJ.
@@ -17,11 +18,30 @@ export async function hasDJPermissions(interaction: ChatInputCommandInteraction 
     return true;
   }
 
-  const settings = await db.guildSettings.findUnique({
-    where: { guildId: interaction.guildId }
-  });
+  const cacheKey = `guild_dj:${interaction.guildId}`;
+  let djRoleId: string | null = null;
+  let cacheHit = false;
 
-  if (!settings || !settings.djRoleId) {
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached !== null) {
+      djRoleId = cached === 'none' ? null : cached;
+      cacheHit = true;
+    }
+  } catch {}
+
+  if (!cacheHit) {
+    const settings = await db.guildSettings.findUnique({
+      where: { guildId: interaction.guildId }
+    });
+    djRoleId = settings?.djRoleId || null;
+
+    try {
+      await redis.set(cacheKey, djRoleId || 'none', 'EX', 3600);
+    } catch {}
+  }
+
+  if (!djRoleId) {
     return true;
   }
 
@@ -29,10 +49,10 @@ export async function hasDJPermissions(interaction: ChatInputCommandInteraction 
   if ('roles' in interaction.member) {
     if (Array.isArray(interaction.member.roles)) {
       // APIInteractionGuildMember
-      return interaction.member.roles.includes(settings.djRoleId);
+      return interaction.member.roles.includes(djRoleId);
     } else {
       // GuildMember (GuildMemberRoleManager)
-      return interaction.member.roles.cache.has(settings.djRoleId);
+      return interaction.member.roles.cache.has(djRoleId);
     }
   }
 

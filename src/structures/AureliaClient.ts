@@ -39,7 +39,7 @@ export class AureliaClient extends Client {
         name: 'LocalNode',
         url: lavaUrl,
         auth: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
-        secure: lavaPort === '443',
+        secure: lavaPort === '443' || process.env.LAVALINK_SECURE === 'true',
       },
     ];
 

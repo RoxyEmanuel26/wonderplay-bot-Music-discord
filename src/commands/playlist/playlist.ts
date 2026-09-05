@@ -43,7 +43,10 @@ const playlistCommand: Command = {
 
     if (subcommand === 'create') {
       const name = ctx.isInteraction ? ctx.interaction!.options.getString('name', true) : ctx.args.slice(1).join(' ');
-      if (!name) return;
+      if (!name) {
+        await ctx.followUp({ embeds: [createErrorEmbed('Mohon tentukan nama playlist yang ingin dibuat.')] });
+        return;
+      }
       const existing = await db.playlist.findFirst({ where: { userId: ctx.author.id, name } });
       if (existing) {
         await ctx.followUp({ embeds: [createErrorEmbed(`Playlist **${name}** sudah ada.`)] });
@@ -68,7 +71,10 @@ const playlistCommand: Command = {
 
     } else if (subcommand === 'add') {
       const name = ctx.isInteraction ? ctx.interaction!.options.getString('name', true) : ctx.args.slice(1).join(' ');
-      if (!name) return;
+      if (!name) {
+        await ctx.followUp({ embeds: [createErrorEmbed('Mohon tentukan nama playlist tujuan.')] });
+        return;
+      }
       const queue = client.queues.get(ctx.guildId!);
       if (!queue || !queue.current) {
         await ctx.followUp({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar.')] });
@@ -91,7 +97,10 @@ const playlistCommand: Command = {
 
     } else if (subcommand === 'play') {
       const name = ctx.isInteraction ? ctx.interaction!.options.getString('name', true) : ctx.args.slice(1).join(' ');
-      if (!name) return;
+      if (!name) {
+        await ctx.followUp({ embeds: [createErrorEmbed('Mohon tentukan nama playlist yang ingin diputar.')] });
+        return;
+      }
       const playlist = await db.playlist.findFirst({ where: { userId: ctx.author.id, name } });
       
       if (!playlist || playlist.tracks.length === 0) {
@@ -118,7 +127,7 @@ const playlistCommand: Command = {
         const player = await client.shoukaku.joinVoiceChannel({
           guildId: ctx.guildId!,
           channelId: voiceChannel.id,
-          shardId: 0,
+          shardId: ctx.guild?.shardId ?? 0,
         });
         queue = new Queue(client, player, ctx.channel as TextChannel, ctx.guildId!);
         client.queues.set(ctx.guildId!, queue);

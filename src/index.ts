@@ -28,6 +28,10 @@ const shutdown = async () => {
   client.destroy();
   const { db } = await import('./database/db');
   await db.$disconnect();
+  try {
+    const { redis } = await import('./database/redis');
+    redis.disconnect();
+  } catch {}
   process.exit(0);
 };
 
@@ -50,11 +54,11 @@ app.get('/api/stats', (req, res) => {
       guilds: client.guilds.cache.size,
       users: client.users.cache.size,
     },
-    lavalink: Array.from(client.shoukaku.nodes.values()).map(n => ({
+    lavalink: client.shoukaku?.nodes ? Array.from(client.shoukaku.nodes.values()).map(n => ({
       name: n.name,
       state: n.state,
       players: n.stats?.players || 0,
-    })),
+    })) : [],
     queues: client.queues.size,
   });
 });

@@ -31,8 +31,8 @@ const volumeCommand: Command = {
     
     const level = ctx.isInteraction ? ctx.interaction!.options.getInteger('level', true) : parseInt(ctx.args[0]);
     
-    if (isNaN(level)) {
-      await ctx.reply({ embeds: [createErrorEmbed('Mohon berikan level volume yang valid (1-200).')], ephemeral: true });
+    if (isNaN(level) || level < 1 || level > 200) {
+      await ctx.reply({ embeds: [createErrorEmbed('Mohon berikan level volume yang valid antara 1 - 200.')], ephemeral: true });
       return;
     }
     queue.player.setGlobalVolume(level);

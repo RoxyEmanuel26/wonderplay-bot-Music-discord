@@ -97,7 +97,7 @@ const favoriteCommand: Command = {
         const player = await client.shoukaku.joinVoiceChannel({
           guildId: ctx.guildId!,
           channelId: voiceChannel.id,
-          shardId: 0,
+          shardId: ctx.guild?.shardId ?? 0,
         });
         queue = new Queue(client, player, ctx.channel as TextChannel, ctx.guildId!);
         client.queues.set(ctx.guildId!, queue);
@@ -113,6 +113,11 @@ const favoriteCommand: Command = {
             loaded++;
           }
         }
+      }
+
+      if (loaded === 0) {
+        await ctx.followUp({ embeds: [createErrorEmbed('Tidak ada lagu favorit yang berhasil dimuat atau lagu tidak tersedia.')] });
+        return;
       }
 
       await ctx.followUp({ embeds: [createSuccessEmbed(`Berhasil memuat **${loaded}** lagu favorit ke antrean!`)] });

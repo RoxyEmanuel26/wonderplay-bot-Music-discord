@@ -66,6 +66,9 @@ export class Context {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async reply(options: string | MessagePayload | InteractionReplyOptions): Promise<Message | any> {
     if (this.isInteraction) {
+      if (this.interaction!.deferred || this.interaction!.replied) {
+        return await this.interaction!.editReply(options as any);
+      }
       return await this.interaction!.reply(options as InteractionReplyOptions);
     } else {
       const msg = await this.channel!.send(options as BaseMessageOptions);
@@ -77,6 +80,11 @@ export class Context {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async followUp(options: string | MessagePayload | InteractionReplyOptions): Promise<Message | any> {
     if (this.isInteraction) {
+      // Jika interaksi baru saja di-defer dan belum pernah dijawab,
+      // selesaikan status 'thinking' terlebih dahulu dengan editReply
+      if (this.interaction!.deferred && !this.interaction!.replied) {
+        return await this.interaction!.editReply(options as any);
+      }
       return await this.interaction!.followUp(options as InteractionReplyOptions);
     } else {
       const msg = await this.channel!.send(options as BaseMessageOptions);

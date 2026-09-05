@@ -71,6 +71,12 @@ const configCommand: Command = {
         update: { djRoleId: roleId },
         create: { guildId: ctx.guildId!, djRoleId: roleId },
       });
+
+      // Hapus cache lama di Redis agar sistem langsung menyesuaikan
+      try {
+        await redis.del(`guild_dj:${ctx.guildId!}`);
+      } catch (err) {}
+
       await ctx.reply({ embeds: [createSuccessEmbed(`Role DJ telah diatur ke <@&${roleId}>.`)] });
 
     } else if (subcommand === 'mode247') {

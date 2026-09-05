@@ -71,28 +71,46 @@ const playCommand: Command = {
       return;
     }
 
-    let track;
+    let queue = client.queues.get(ctx.guildId!);
+    if (!queue) {
+      const player = await client.shoukaku.joinVoiceChannel({
+        guildId: ctx.guildId!,
+        channelId: voiceChannel.id,
+        shardId: ctx.guild?.shardId ?? 0,
+      });
+
+      queue = new Queue(client, player, ctx.channel as TextChannel, ctx.guildId!);
+      client.queues.set(ctx.guildId!, queue);
+    }
+
     if (result.loadType === 'playlist') {
-      track = result.data.tracks[0];
-    } else if (result.loadType === 'search' || result.loadType === 'track') {
+      const playlistData = result.data as { info: { name: string }; tracks: any[] };
+      const tracks = playlistData.tracks || [];
+      
+      if (tracks.length === 0) {
+        await ctx.followUp({ embeds: [createErrorEmbed('Playlist kosong atau tidak dapat dimuat.')] });
+        return;
+      }
+
+      for (const tr of tracks) {
+        queue.enqueue(tr);
+      }
+
+      const playlistName = playlistData.info?.name || 'Playlist';
+      await ctx.followUp({
+        embeds: [createSuccessEmbed(`Berhasil menambahkan **${tracks.length}** lagu dari playlist **${playlistName}** ke antrean! 🎶`)],
+      });
+      return;
+    }
+
+    let track;
+    if (result.loadType === 'search' || result.loadType === 'track') {
       track = Array.isArray(result.data) ? result.data[0] : result.data;
     }
 
     if (!track) {
       await ctx.followUp({ embeds: [createErrorEmbed('Gagal memuat lagu.')] });
       return;
-    }
-
-    let queue = client.queues.get(ctx.guildId!);
-    if (!queue) {
-      const player = await client.shoukaku.joinVoiceChannel({
-        guildId: ctx.guildId!,
-        channelId: voiceChannel.id,
-        shardId: 0,
-      });
-
-      queue = new Queue(client, player, ctx.channel as TextChannel, ctx.guildId!);
-      client.queues.set(ctx.guildId!, queue);
     }
 
     queue.enqueue(track);

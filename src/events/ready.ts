@@ -9,18 +9,22 @@ const readyEvent: Event<Events.ClientReady> = {
     logger.info(`Logged in as ${clientReady.user.tag}!`);
     logger.info(`Loaded ${client.commands.size} commands in memory.`);
 
-    try {
-      const rest = new REST().setToken(process.env.DISCORD_TOKEN!);
-      const body = client.commands.map(cmd => cmd.data.toJSON());
-      
-      logger.info('Started refreshing application (/) commands...');
-      await rest.put(
-        Routes.applicationCommands(clientReady.user.id),
-        { body }
-      );
-      logger.info(`Successfully reloaded ${body.length} application (/) commands globally.`);
-    } catch (error) {
-      logger.error(error, 'Failed to refresh application (/) commands');
+    if (process.env.DEPLOY_ON_READY === 'true') {
+      try {
+        const rest = new REST().setToken(process.env.DISCORD_TOKEN!);
+        const body = client.commands.map(cmd => cmd.data.toJSON());
+        
+        logger.info('Started refreshing application (/) commands...');
+        await rest.put(
+          Routes.applicationCommands(clientReady.user.id),
+          { body }
+        );
+        logger.info(`Successfully reloaded ${body.length} application (/) commands globally.`);
+      } catch (error) {
+        logger.error(error, 'Failed to refresh application (/) commands');
+      }
+    } else {
+      logger.info('Slash commands deployment skipped on startup (Gunakan "npm run deploy" untuk memperbarui command).');
     }
   },
 };

@@ -60,6 +60,10 @@ const filterCommand: Command = {
     const collector = message.createMessageComponentCollector({ componentType: ComponentType.StringSelect, time: 60000 });
 
     collector.on('collect', async (i: any) => {
+      if (i.user.id !== ctx.author.id) {
+        await i.reply({ content: '❌ Hanya pemanggil perintah yang dapat mengatur filter ini.', ephemeral: true });
+        return;
+      }
       const value = i.values[0];
       
       // Selalu clear filter lama sebelum menerapkan yang baru agar tidak bertumpuk

@@ -1,5 +1,5 @@
 import { Player, Track } from 'shoukaku';
-import { TextChannel, Message, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } from 'discord.js';
+import { TextChannel, Message, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, InteractionCollector, ButtonInteraction } from 'discord.js';
 import { AureliaClient } from './AureliaClient';
 import { logger } from '../utils/logger';
 import { createBaseEmbed } from '../utils/embeds';
@@ -16,6 +16,7 @@ export class Queue {
   public guildId: string;
   public loop: 'NONE' | 'TRACK' | 'QUEUE' = 'NONE';
   public nowPlayingMessage: Message | null = null;
+  public collector: InteractionCollector<ButtonInteraction> | null = null;
 
   constructor(client: AureliaClient, player: Player, textChannel: TextChannel, guildId: string) {
     this.client = client;
@@ -111,6 +112,10 @@ export class Queue {
     );
 
     try {
+      if (this.collector) {
+        this.collector.stop();
+        this.collector = null;
+      }
       if (this.nowPlayingMessage) {
         await this.nowPlayingMessage.delete().catch(() => null);
       }
@@ -122,9 +127,9 @@ export class Queue {
   }
 
   private setupButtonCollector(message: Message) {
-    const collector = message.createMessageComponentCollector({ componentType: ComponentType.Button, time: this.current?.info.length || 300000 });
+    this.collector = message.createMessageComponentCollector({ componentType: ComponentType.Button, time: this.current?.info.length || 300000 });
 
-    collector.on('collect', async (interaction) => {
+    this.collector.on('collect', async (interaction) => {
       const hasPermission = await hasDJPermissions(interaction);
       if (!hasPermission) {
         await interaction.reply({ content: '❌ Kamu membutuhkan role DJ untuk menggunakan tombol ini.', ephemeral: true });
@@ -138,6 +143,7 @@ export class Queue {
         await interaction.followUp({ content: `⏸️ Musik **${this.player.paused ? 'dijeda' : 'dilanjutkan'}**.`, ephemeral: true });
       } else if (interaction.customId === 'btn_skip') {
         this.skip();
+        await interaction.followUp({ content: '⏭️ Lagu berhasil dilewati.', ephemeral: true });
       } else if (interaction.customId === 'btn_stop') {
         this.stop();
         this.client.shoukaku.leaveVoiceChannel(this.guildId);
@@ -166,12 +172,17 @@ export class Queue {
   }
 
   public stop() {
+    if (this.collector) {
+      this.collector.stop();
+      this.collector = null;
+    }
     this.tracks = [];
     this.current = null;
     this.loop = 'NONE';
     this.player.stopTrack();
     if (this.nowPlayingMessage) {
       this.nowPlayingMessage.delete().catch(() => null);
+      this.nowPlayingMessage = null;
     }
   }
 }
