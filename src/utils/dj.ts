@@ -28,7 +28,9 @@ export async function hasDJPermissions(interaction: ChatInputCommandInteraction 
       djRoleId = cached === 'none' ? null : cached;
       cacheHit = true;
     }
-  } catch {}
+  } catch {
+    /* ignore */
+  }
 
   if (!cacheHit) {
     const settings = await db.guildSettings.findUnique({
@@ -38,7 +40,9 @@ export async function hasDJPermissions(interaction: ChatInputCommandInteraction 
 
     try {
       await redis.set(cacheKey, djRoleId || 'none', 'EX', 3600);
-    } catch {}
+    } catch {
+      /* ignore */
+    }
   }
 
   if (!djRoleId) {

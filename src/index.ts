@@ -31,7 +31,9 @@ const shutdown = async () => {
   try {
     const { redis } = await import('./database/redis');
     redis.disconnect();
-  } catch {}
+  } catch {
+    /* ignore */
+  }
   process.exit(0);
 };
 

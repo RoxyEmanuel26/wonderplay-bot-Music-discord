@@ -30,29 +30,86 @@ export class AureliaClient extends Client {
   }
 
   private initShoukaku() {
-    const lavaHost = process.env.LAVALINK_HOST || 'localhost';
-    const lavaPort = process.env.LAVALINK_PORT || '2333';
-    const lavaUrl = process.env.LAVALINK_URL || `${lavaHost}:${lavaPort}`;
+    const customHost = process.env.LAVALINK_HOST;
+    const customPort = process.env.LAVALINK_PORT || '2333';
+    const customUrl = process.env.LAVALINK_URL || (customHost ? `${customHost}:${customPort}` : null);
+    const customAuth = process.env.LAVALINK_PASSWORD || 'youshallnotpass';
+    const customSecure = customPort === '443' || process.env.LAVALINK_SECURE === 'true';
 
+    // Multi-Node Cluster Configuration (Auto Load Balancing & Failover)
     const nodes = [
       {
-        name: 'LocalNode',
-        url: lavaUrl,
-        auth: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
-        secure: lavaPort === '443' || process.env.LAVALINK_SECURE === 'true',
+        name: 'Node-1 (MilloHost-ID)',
+        url: 'lava-v4.millohost.my.id:443',
+        auth: 'https://discord.gg/mjS5J2K3ep',
+        secure: true,
+      },
+      {
+        name: 'Node-2 (Serenetia-Global)',
+        url: 'lavalinkv4.serenetia.com:443',
+        auth: 'https://seretia.link/discord',
+        secure: true,
       },
     ];
 
+    // Tambahkan custom node dari .env jika dikonfigurasi (misal docker lokal atau VPS pribadi)
+    if (customUrl && !customUrl.includes('jirayu.net')) {
+      nodes.push({
+        name: 'Node-3 (Custom/Local)',
+        url: customUrl,
+        auth: customAuth,
+        secure: customSecure,
+      });
+    }
+
     this.shoukaku = new Shoukaku(new Connectors.DiscordJS(this), nodes, {
+      moveOnDisconnect: true,
       resume: true,
+      resumeByLibrary: true,
       resumeTimeout: 30000,
       reconnectTries: 5,
+      reconnectInterval: 5000,
+      restTimeout: 10000,
     });
 
-    this.shoukaku.on('ready', (name) => logger.info(`Lavalink Node: ${name} is now connected`));
-    this.shoukaku.on('error', (name, error) => logger.warn(`Lavalink Node: ${name} gagal tersambung atau error: ${error.message}`));
-    this.shoukaku.on('close', (name, code, reason) => logger.warn(`Lavalink Node: ${name} closed with code ${code}. Reason: ${reason || 'No reason'}`));
-    this.shoukaku.on('disconnect', (name, count) => logger.warn(`Lavalink Node: ${name} disconnected. Count: ${count}`));
+    this.shoukaku.on('ready', (name) => logger.info(`Lavalink Cluster: Node [${name}] siap & terhubung!`));
+    this.shoukaku.on('error', (name, error) => logger.warn(`Lavalink Cluster: Node [${name}] galat: ${error.message}`));
+    this.shoukaku.on('close', (name, code, reason) => logger.warn(`Lavalink Cluster: Node [${name}] terputus (Code: ${code}, Reason: ${reason || 'None'}). Otomatis failover ke node lain.`));
+    this.shoukaku.on('disconnect', (name, count) => logger.warn(`Lavalink Cluster: Node [${name}] terputus sementara. Mencoba rekoneksi (Percobaan ke-${count}).`));
+  }
+
+  /**
+   * Resolves a track query using the ideal node with automatic failover across all connected cluster nodes.
+   */
+  public async resolveTrack(query: string) {
+    if (!this.shoukaku?.nodes) return null;
+
+    const idealNode = this.shoukaku.getIdealNode();
+    if (idealNode) {
+      try {
+        const res = await idealNode.rest.resolve(query);
+        if (res && res.loadType !== 'empty' && res.loadType !== 'error') {
+          return { result: res, node: idealNode };
+        }
+      } catch {
+        logger.warn(`Resolve gagal pada node [${idealNode.name}], mengalihkan ke node cadangan...`);
+      }
+    }
+
+    // Failover ke node lain yang berstatus connected (state === 1)
+    for (const node of this.shoukaku.nodes.values()) {
+      if (node.name === idealNode?.name || node.state !== 1) continue;
+      try {
+        const res = await node.rest.resolve(query);
+        if (res && res.loadType !== 'empty' && res.loadType !== 'error') {
+          return { result: res, node };
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    return null;
   }
 
   private loadCommands() {

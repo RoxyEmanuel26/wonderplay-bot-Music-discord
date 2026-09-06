@@ -18,7 +18,7 @@ export async function checkCooldown(userId: string, commandName: string, duratio
     } else {
       return true; // Gagal di-set karena sudah ada, berarti masih cooldown (Diblokir)
     }
-  } catch (error) {
+  } catch {
     // Jika Redis mati, fallback biarkan user eksekusi agar bot tidak rusak
     return false;
   }

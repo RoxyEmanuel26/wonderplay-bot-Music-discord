@@ -86,28 +86,36 @@ const favoriteCommand: Command = {
         return;
       }
 
-      const node = client.shoukaku.getIdealNode();
-      if (!node) {
-        await ctx.followUp({ embeds: [createErrorEmbed('Tidak ada node Lavalink yang tersedia saat ini.')] });
+      const hasActiveNode = client.shoukaku?.nodes && Array.from(client.shoukaku.nodes.values()).some(n => n.state === 1);
+      if (!hasActiveNode) {
+        await ctx.followUp({ embeds: [createErrorEmbed('Tidak ada node audio Lavalink yang tersedia saat ini.')] });
         return;
       }
 
       let queue = client.queues.get(ctx.guildId!);
       if (!queue) {
-        const player = await client.shoukaku.joinVoiceChannel({
-          guildId: ctx.guildId!,
-          channelId: voiceChannel.id,
-          shardId: ctx.guild?.shardId ?? 0,
-        });
-        queue = new Queue(client, player, ctx.channel as TextChannel, ctx.guildId!);
-        client.queues.set(ctx.guildId!, queue);
+        try {
+          const player = await client.shoukaku.joinVoiceChannel({
+            guildId: ctx.guildId!,
+            channelId: voiceChannel.id,
+            shardId: ctx.guild?.shardId ?? 0,
+            deaf: true,
+          });
+          queue = new Queue(client, player, ctx.channel as TextChannel, ctx.guildId!);
+          client.queues.set(ctx.guildId!, queue);
+        } catch {
+          await ctx.followUp({ embeds: [createErrorEmbed('Gagal bergabung ke saluran suara. Periksa izin bot.')] });
+          return;
+        }
       }
 
       let loaded = 0;
       for (const fav of favorites) {
-        const result = await node.rest.resolve(fav.trackUri.startsWith('http') ? fav.trackUri : `ytsearch:${fav.trackUri}`);
-        if (result && result.data && result.loadType !== 'empty' && result.loadType !== 'error') {
-          const track = result.loadType === 'playlist' ? result.data.tracks[0] : (Array.isArray(result.data) ? result.data[0] : result.data);
+        const query = fav.trackUri.startsWith('http') ? fav.trackUri : `ytsearch:${fav.trackUri}`;
+        const resolved = await client.resolveTrack(query);
+        if (resolved && resolved.result && resolved.result.data) {
+          const resData = resolved.result.data;
+          const track = resolved.result.loadType === 'playlist' ? (resData as any).tracks[0] : (Array.isArray(resData) ? resData[0] : resData);
           if (track) {
             queue.enqueue(track);
             loaded++;
@@ -121,6 +129,8 @@ const favoriteCommand: Command = {
       }
 
       await ctx.followUp({ embeds: [createSuccessEmbed(`Berhasil memuat **${loaded}** lagu favorit ke antrean!`)] });
+    } else {
+      await ctx.followUp({ embeds: [createErrorEmbed('Aksi tidak dikenal. Pilihan yang tersedia: `add`, `list`, atau `play`.')] });
     }
   },
 };

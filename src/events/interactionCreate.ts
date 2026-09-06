@@ -39,7 +39,11 @@ const interactionCreateEvent: Event<Events.InteractionCreate> = {
         const errorMsg = t('errorExecuting', lang);
         
         if (interaction.replied || interaction.deferred) {
-          await interaction.followUp({ content: errorMsg, ephemeral: true });
+          if (interaction.deferred && !interaction.replied) {
+            await interaction.editReply({ content: errorMsg });
+          } else {
+            await interaction.followUp({ content: errorMsg, ephemeral: true });
+          }
         } else {
           await interaction.reply({ content: errorMsg, ephemeral: true });
         }

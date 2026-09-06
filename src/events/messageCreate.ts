@@ -1,4 +1,4 @@
-import { Events, Message, PermissionsBitField, Collection, TextChannel } from 'discord.js';
+import { Message, PermissionsBitField, TextChannel } from 'discord.js';
 import { Event } from '../structures/Event';
 import { logger } from '../utils/logger';
 import { Context } from '../structures/Context';

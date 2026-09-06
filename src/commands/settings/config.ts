@@ -1,10 +1,8 @@
-import {  SlashCommandBuilder, PermissionFlagsBits  } from 'discord.js';
+import { SlashCommandBuilder, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
 import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
-import { createErrorEmbed } from '../../utils/embeds';
-import { PermissionsBitField } from 'discord.js';
-import { Language } from '../../utils/i18n'; '../../structures/Command';
-import { createSuccessEmbed } from '../../utils/embeds';
+import { createErrorEmbed, createSuccessEmbed } from '../../utils/embeds';
+import { Language } from '../../utils/i18n';
 import { db } from '../../database/db';
 import { redis } from '../../database/redis';
 
@@ -53,17 +51,40 @@ const configCommand: Command = {
       return;
     }
 
-    const subcommand = ctx.isInteraction ? ctx.interaction!.options.getSubcommand() : ctx.args[0];
+    const subcommand = ctx.isInteraction ? ctx.interaction!.options.getSubcommand() : ctx.args[0]?.toLowerCase();
+
+    if (!subcommand) {
+      await ctx.reply({
+        embeds: [
+          createErrorEmbed(
+            '**Panduan Pengaturan Konfigurasi Server:**\n' +
+            '• `!config djrole <@role/roleId>` - Mengatur role DJ\n' +
+            '• `!config mode247 <on/off>` - Mengatur mode standby 24/7\n' +
+            '• `!config language <id/en>` - Mengubah bahasa bot'
+          )
+        ],
+        ephemeral: true,
+      });
+      return;
+    }
 
     if (subcommand === 'djrole') {
-      let roleId = '';
+      let roleId: string;
       if (ctx.isInteraction) {
         const role = ctx.interaction!.options.getRole('role', true);
         roleId = role.id;
       } else {
         const roleArg = ctx.args[1];
-        if (!roleArg) return;
+        if (!roleArg) {
+          await ctx.reply({ embeds: [createErrorEmbed('Mohon tentukan role DJ. Contoh: `!config djrole @DJ`')], ephemeral: true });
+          return;
+        }
         roleId = roleArg.replace(/<@&|>/g, '');
+      }
+
+      if (ctx.guild && !ctx.guild.roles.cache.has(roleId)) {
+        await ctx.reply({ embeds: [createErrorEmbed('Role tidak ditemukan di server ini.')], ephemeral: true });
+        return;
       }
 
       await db.guildSettings.upsert({
@@ -75,16 +96,23 @@ const configCommand: Command = {
       // Hapus cache lama di Redis agar sistem langsung menyesuaikan
       try {
         await redis.del(`guild_dj:${ctx.guildId!}`);
-      } catch (err) {}
+      } catch {
+        /* ignore */
+      }
 
-      await ctx.reply({ embeds: [createSuccessEmbed(`Role DJ telah diatur ke <@&${roleId}>.`)] });
+      await ctx.reply({ embeds: [createSuccessEmbed(`Role DJ telah berhasil diatur ke <@&${roleId}>.`)] });
 
     } else if (subcommand === 'mode247') {
-      let enabled = false;
+      let enabled: boolean;
       if (ctx.isInteraction) {
         enabled = ctx.interaction!.options.getBoolean('enabled', true);
       } else {
-        enabled = ctx.args[1] === 'true' || ctx.args[1] === 'on';
+        const arg = ctx.args[1]?.toLowerCase();
+        if (!arg || !['true', 'on', 'yes', '1', 'false', 'off', 'no', '0'].includes(arg)) {
+          await ctx.reply({ embeds: [createErrorEmbed('Mohon tentukan status mode 24/7. Contoh: `!config mode247 on` atau `!config mode247 off`')], ephemeral: true });
+          return;
+        }
+        enabled = ['true', 'on', 'yes', '1'].includes(arg);
       }
 
       await db.guildSettings.upsert({
@@ -95,11 +123,16 @@ const configCommand: Command = {
       await ctx.reply({ embeds: [createSuccessEmbed(`Mode 24/7 telah **${enabled ? 'Diaktifkan' : 'Dinonaktifkan'}**.`)] });
       
     } else if (subcommand === 'language') {
-      let langStr = '';
+      let langStr: string | null | undefined;
       if (ctx.isInteraction) {
         langStr = ctx.interaction!.options.getString('lang', true);
       } else {
-        langStr = ctx.args[1];
+        langStr = ctx.args[1]?.toLowerCase();
+      }
+
+      if (!langStr || !['id', 'en'].includes(langStr)) {
+        await ctx.reply({ embeds: [createErrorEmbed('Pilihan bahasa tidak valid. Pilih antara `id` (Indonesia) atau `en` (English). Contoh: `!config language id`')], ephemeral: true });
+        return;
       }
       
       const lang = langStr as Language;
@@ -113,10 +146,17 @@ const configCommand: Command = {
       // Hapus cache lama di Redis agar sistem langsung menyesuaikan
       try {
         await redis.del(`guild_lang:${ctx.guildId!}`);
-      } catch (err) {}
+      } catch {
+        /* ignore */
+      }
 
       const response = lang === 'id' ? 'Bahasa berhasil diubah ke **Indonesia**.' : 'Language successfully changed to **English**.';
       await ctx.reply({ embeds: [createSuccessEmbed(response)] });
+    } else {
+      await ctx.reply({
+        embeds: [createErrorEmbed('Subcommand tidak dikenal. Pilihan yang tersedia: `djrole`, `mode247`, `language`.')],
+        ephemeral: true,
+      });
     }
   },
 };
