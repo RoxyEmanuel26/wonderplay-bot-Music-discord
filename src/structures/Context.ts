@@ -7,6 +7,8 @@ import {
   User,
   BaseMessageOptions,
   InteractionReplyOptions,
+  InteractionDeferReplyOptions,
+  MessageFlags,
   MessagePayload
 } from 'discord.js';
 
@@ -55,7 +57,7 @@ export class Context {
     return this.isInteraction ? this.interaction!.member : this.message!.member;
   }
   
-  async deferReply(options?: { ephemeral?: boolean }): Promise<void> {
+  async deferReply(options?: InteractionDeferReplyOptions): Promise<void> {
     if (this.isInteraction) {
       await this.interaction!.deferReply(options);
     } else {
@@ -71,7 +73,7 @@ export class Context {
       }
       return await this.interaction!.reply(options as InteractionReplyOptions);
     } else {
-      const msg = await this.channel!.send(options as BaseMessageOptions);
+      const msg = await this.channel!.send(toMessageOptions(options));
       this.sentMessage = msg;
       return msg;
     }
@@ -87,7 +89,7 @@ export class Context {
       }
       return await this.interaction!.followUp(options as InteractionReplyOptions);
     } else {
-      const msg = await this.channel!.send(options as BaseMessageOptions);
+      const msg = await this.channel!.send(toMessageOptions(options));
       this.sentMessage = msg;
       return msg;
     }
@@ -99,10 +101,22 @@ export class Context {
       return await this.interaction!.editReply(options as any);
     } else {
       if (this.sentMessage) {
-        return await this.sentMessage.edit(options as BaseMessageOptions);
+        return await this.sentMessage.edit(toMessageOptions(options));
       } else {
         return await this.reply(options);
       }
     }
   }
+}
+
+function toMessageOptions(options: string | MessagePayload | InteractionReplyOptions): string | MessagePayload | BaseMessageOptions {
+  if (typeof options === 'string' || options instanceof MessagePayload) return options;
+  const normalized = { ...options } as InteractionReplyOptions & { withResponse?: boolean };
+  if (typeof normalized.flags === 'number') {
+    const flags = normalized.flags & ~MessageFlags.Ephemeral;
+    if (flags) normalized.flags = flags;
+    else delete normalized.flags;
+  }
+  delete normalized.withResponse;
+  return normalized as BaseMessageOptions;
 }

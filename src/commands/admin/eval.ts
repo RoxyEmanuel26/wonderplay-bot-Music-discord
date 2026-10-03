@@ -1,8 +1,17 @@
-import { SlashCommandBuilder } from 'discord.js';
+import { MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { Command } from '../../structures/Command';
 import { Context } from '../../structures/Context';
 import { createSuccessEmbed, createErrorEmbed } from '../../utils/embeds';
 import util from 'util';
+
+function redactSensitiveValues(value: string): string {
+  const sensitiveKey = /(TOKEN|SECRET|PASSWORD|DATABASE_URL|REDIS_URL|API_KEY|SP_DC|COOKIE|PRIVATE_KEY)/i;
+  const secrets = Object.entries(process.env)
+    .filter(([key, secret]) => sensitiveKey.test(key) && Boolean(secret) && secret!.length >= 4)
+    .map(([, secret]) => secret as string)
+    .sort((a, b) => b.length - a.length);
+  return secrets.reduce((output, secret) => output.replaceAll(secret, '[REDACTED_SECRET]'), value);
+}
 
 const evalCommand: Command = {
   data: new SlashCommandBuilder()
@@ -20,17 +29,17 @@ const evalCommand: Command = {
     const ownerIds = envOwner.split(',').map(id => id.trim()).filter(Boolean);
     
     if (!envOwner || !ownerIds.includes(ctx.author.id)) {
-      await ctx.reply({ embeds: [createErrorEmbed('Anda tidak memiliki izin untuk menggunakan perintah ini.')], ephemeral: true });
+      await ctx.reply({ embeds: [createErrorEmbed('Anda tidak memiliki izin untuk menggunakan perintah ini.')], flags: MessageFlags.Ephemeral });
       return;
     }
 
     const code = ctx.isInteraction ? ctx.interaction!.options.getString('code', true) : ctx.args.join(' ');
     if (!code) {
-      await ctx.reply({ embeds: [createErrorEmbed('Mohon berikan kode untuk dieksekusi.')], ephemeral: true });
+      await ctx.reply({ embeds: [createErrorEmbed('Mohon berikan kode untuk dieksekusi.')], flags: MessageFlags.Ephemeral });
       return;
     }
 
-    await ctx.deferReply({ ephemeral: true });
+    await ctx.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       let evaled = await eval(code);
@@ -39,18 +48,7 @@ const evalCommand: Command = {
       }
 
       // Sanitasi variabel sensitif (.env) agar tidak bocor ke chat
-      const secrets = [
-        process.env.DISCORD_TOKEN,
-        process.env.LAVALINK_PASSWORD,
-        process.env.DATABASE_URL,
-        process.env.REDIS_URL,
-      ].filter(Boolean) as string[];
-
-      for (const secret of secrets) {
-        if (secret && evaled.includes(secret)) {
-          evaled = evaled.replaceAll(secret, '[REDACTED_SECRET]');
-        }
-      }
+      evaled = redactSensitiveValues(evaled);
 
       // Pastikan output tidak melebihi limit 4000 karakter Discord
       if (evaled.length > 4000) {
@@ -60,12 +58,7 @@ const evalCommand: Command = {
       await ctx.followUp({ embeds: [createSuccessEmbed(`**Output:**\n\`\`\`js\n${evaled}\n\`\`\``)] });
     } catch (e: unknown) {
       let errString = e instanceof Error ? e.message : String(e);
-      const secrets = [process.env.DISCORD_TOKEN, process.env.LAVALINK_PASSWORD].filter(Boolean) as string[];
-      for (const secret of secrets) {
-        if (secret && errString.includes(secret)) {
-          errString = errString.replaceAll(secret, '[REDACTED_SECRET]');
-        }
-      }
+      errString = redactSensitiveValues(errString);
 
       await ctx.followUp({
         embeds: [createErrorEmbed(`**Error:**\n\`\`\`js\n${errString.slice(0, 1000)}\n\`\`\``)],

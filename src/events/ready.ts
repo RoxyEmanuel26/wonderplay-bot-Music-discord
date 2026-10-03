@@ -8,6 +8,7 @@ const readyEvent: Event<Events.ClientReady> = {
   execute: async (clientReady, client) => {
     logger.info(`Logged in as ${clientReady.user.tag}!`);
     logger.info(`Loaded ${client.commands.size} commands in memory.`);
+    client.markDiscordReady();
 
     if (process.env.DEPLOY_ON_READY === 'true') {
       try {

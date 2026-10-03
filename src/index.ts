@@ -25,6 +25,8 @@ process.on('uncaughtException', (err) => {
 // Graceful shutdown
 const shutdown = async () => {
   logger.info('Shutting down...');
+  const { playbackSessionService } = await import('./services/PlaybackSessionService');
+  await playbackSessionService.flush(client.queues.values());
   client.destroy();
   const { db } = await import('./database/db');
   await db.$disconnect();
@@ -72,4 +74,3 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   logger.info(`Web Dashboard is running on port ${PORT}`);
 });
-

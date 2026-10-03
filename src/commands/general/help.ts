@@ -1,4 +1,4 @@
-import {  SlashCommandBuilder, StringSelectMenuBuilder, ActionRowBuilder, StringSelectMenuOptionBuilder, ComponentType  } from 'discord.js';
+import { SlashCommandBuilder, StringSelectMenuBuilder, ActionRowBuilder, StringSelectMenuOptionBuilder, ComponentType, MessageFlags } from 'discord.js';
 import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
 import { createBaseEmbed } from '../../utils/embeds';
@@ -12,7 +12,7 @@ const helpCommand: Command = {
     // Definisi Embed Beranda
     const homeEmbed = createBaseEmbed()
       .setTitle('✨ Pusat Bantuan AURELIA')
-      .setDescription('Selamat datang di **Aurelia** — Bot Musik Resmi untuk server Wonderplay.\n\n💡 **Dukungan Hibrida & Alias:** Seluruh perintah dapat dipanggil menggunakan *Slash Command* (contoh: `/play`) MAUPUN *Prefix* (contoh: `!play`). Anda juga bisa menggunakan **Alias Cepat** untuk Prefix:\n`!p` (play), `!q` (queue), `!s` (skip), `!v` (volume), `!pa` (pause), `!res` (resume), `!st` (stop), `!fav` (favorite), `!pl` (playlist), `!cfg` (config), `!h` (help).\n\nSilakan pilih kategori pada menu di bawah untuk melihat daftar perintah.')
+      .setDescription('Selamat datang di **Aurelia** — Bot Musik Resmi untuk server Wonderplay.\n\n💡 **Dukungan Hibrida & Alias:** Seluruh perintah dapat dipanggil menggunakan *Slash Command* (contoh: `/play`) MAUPUN *Prefix* (contoh: `!play`). Anda juga bisa menggunakan **Alias Cepat** untuk Prefix:\n`!p` (play), `!q` (queue), `!s` (skip), `!v` (volume), `!pa` (pause), `!res` (resume), `!st` (stop), `!dc` (disconnect), `!fav` (favorite), `!pl` (playlist), `!cfg` (config), `!h` (help).\n\nSilakan pilih kategori pada menu di bawah untuk melihat daftar perintah.')
       .addFields(
         { name: '🎵 Kualitas Audio', value: 'Didukung oleh Lavalink v4, menghadirkan audio sejernih kristal tanpa *lag*.' },
         { name: '🌍 Multi-Bahasa', value: 'Mendukung bahasa Indonesia & Inggris secara independen di tiap server.' },
@@ -30,8 +30,9 @@ const helpCommand: Command = {
         { name: '`/np` & `!np` (Now Playing)', value: 'Melihat lagu yang sedang diputar lengkap dengan *Progress Bar* visual.' },
         { name: '`/queue` & `!queue`', value: 'Melihat daftar antrean lagu saat ini. Dilengkapi tombol kontrol interaktif.' },
         { name: '`/pause` & `!pause` | `/resume` & `!resume`', value: 'Menjeda atau melanjutkan lagu.' },
-        { name: '`/skip` & `!skip` | `/stop` & `!stop`', value: 'Melompati lagu saat ini, atau menghentikan musik sepenuhnya.' },
-        { name: '`/volume` & `!volume [1-200]`', value: 'Mengatur tingkat volume musik.' },
+        { name: '`/skip` & `!skip` | `/stop` & `!stop`', value: 'Melompati lagu, atau membersihkan antrean tanpa mengeluarkan bot.' },
+        { name: '`/disconnect` & `!dc`', value: 'Mengeluarkan bot dari voice channel dan menghapus sesi playback.' },
+        { name: '`/volume` & `!volume [0-100]`', value: 'Mengatur tingkat volume bersih tanpa clipping.' },
         { name: '`/filter` & `!filter`', value: 'Menerapkan efek audio (Bassboost, Nightcore, Vaporwave, Karaoke).' }
       );
 
@@ -55,7 +56,6 @@ const helpCommand: Command = {
       .setDescription('Perintah khusus untuk mengatur perilaku bot di server ini.')
       .addFields(
         { name: '`/config djrole` & `!config djrole [@role]`', value: '*(Admin Only)* Menetapkan Role DJ. Jika diatur, hanya member dengan role ini yang bisa mengatur musik (Skip, Stop, Filter, dll).' },
-        { name: '`/config mode247` & `!config mode247 [True/False]`', value: '*(Admin Only)* Menyalakan mode 24/7. Bot tidak akan keluar meskipun antrean habis atau voice channel kosong.' },
         { name: '`/config language` & `!config language [ID/EN]`', value: '*(Admin Only)* Mengubah bahasa bot untuk server ini.' },
         { name: '`/ping` & `!ping`', value: 'Mengecek kecepatan (latency) jaringan bot.' },
         { name: '`/eval` & `!eval`', value: '*(Owner Only)* Menjalankan kode JavaScript mentah (Developer Only).' }
@@ -90,18 +90,19 @@ const helpCommand: Command = {
 
     const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
 
-    const message = await ctx.reply({
+    const response = await ctx.reply({
       embeds: [homeEmbed],
       components: [row],
-      ephemeral: true, // Help command biasanya ephemeral agar tidak menuh-menuhin chat
-      fetchReply: true,
+      flags: MessageFlags.Ephemeral,
+      withResponse: true,
     });
+    const message = response.resource?.message || response;
 
     const collector = message.createMessageComponentCollector({ componentType: ComponentType.StringSelect, time: 300000 }); // 5 menit
 
     collector.on('collect', async (i: any) => {
       if (i.user.id !== ctx.author.id) {
-        await i.reply({ content: '❌ Hanya pemanggil perintah yang dapat menggunakan menu ini.', ephemeral: true });
+        await i.reply({ content: '❌ Hanya pemanggil perintah yang dapat menggunakan menu ini.', flags: MessageFlags.Ephemeral });
         return;
       }
       const value = i.values[0];

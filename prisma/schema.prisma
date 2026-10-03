@@ -8,11 +8,11 @@ datasource db {
 }
 
 model GuildSettings {
-  guildId   String  @id
-  djRoleId  String?
-  mode247   Boolean @default(false)
-  prefix    String  @default("!")
-  language  String  @default("id")
+  guildId  String  @id
+  djRoleId String?
+  mode247  Boolean @default(false)
+  prefix   String  @default("!")
+  language String  @default("id")
 }
 
 model Playlist {
@@ -29,4 +29,27 @@ model Favorite {
   trackUri  String
   title     String
   createdAt DateTime @default(now())
+}
+
+enum PlaybackSessionStatus {
+  ACTIVE
+  RECOVERING
+  DISCONNECTING
+}
+
+model PlaybackSession {
+  guildId        String                @id
+  voiceChannelId String
+  textChannelId  String?
+  nodeName       String?
+  current        Json?
+  tracks         Json
+  history        Json
+  loop           String                @default("NONE")
+  volume         Int                   @default(100)
+  paused         Boolean               @default(false)
+  positionMs     Int                   @default(0)
+  filters        Json?
+  status         PlaybackSessionStatus @default(ACTIVE)
+  updatedAt      DateTime              @updatedAt
 }

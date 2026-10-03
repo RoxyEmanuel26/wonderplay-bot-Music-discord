@@ -127,8 +127,8 @@ dist/
 build/
 
 # Bot Specific
-lavalink/logs/
-lavalink/application.yml.bak
+# Lavalink is deployed and configured separately; never publish its files.
+/lavalink/
 
 # Docker
 docker-compose.override.yml
@@ -142,3 +142,4 @@ docker-compose.override.yml
 
 # Blueprint
 prompt-bot-musik-discord-antigravity.md
+graphify-out

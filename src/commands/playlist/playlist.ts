@@ -1,9 +1,11 @@
-import {  SlashCommandBuilder, TextChannel  } from 'discord.js';
+import { MessageFlags, SlashCommandBuilder, TextChannel } from 'discord.js';
 import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
 import { db } from '../../database/db';
 import { createSuccessEmbed, createErrorEmbed } from '../../utils/embeds';
 import { Queue } from '../../structures/Queue';
+import { parseSpotifyUrl, spotifyFallbackService } from '../../services/SpotifyFallbackService';
+import { Track } from 'shoukaku';
 
 const playlistCommand: Command = {
   data: new SlashCommandBuilder()
@@ -36,7 +38,7 @@ const playlistCommand: Command = {
   execute: async (ctx: Context, client) => {
     const subcommand = ctx.isInteraction ? ctx.interaction!.options.getSubcommand() : ctx.args[0];
     if (!subcommand) {
-      await ctx.reply({ embeds: [createErrorEmbed('Mohon pilih aksi: `create`, `list`, `add`, atau `play`.')], ephemeral: true });
+      await ctx.reply({ embeds: [createErrorEmbed('Mohon pilih aksi: `create`, `list`, `add`, atau `play`.')], flags: MessageFlags.Ephemeral });
       return;
     }
     await ctx.deferReply();
@@ -65,7 +67,9 @@ const playlistCommand: Command = {
         await ctx.followUp({ embeds: [createErrorEmbed('Kamu belum memiliki playlist apapun.')] });
         return;
       }
-      const desc = playlists.map(p => `**${p.name}** - ${p.tracks.length} lagu`).join('\n');
+      const shown = playlists.slice(0, 50);
+      const desc = shown.map(p => `**${p.name.slice(0, 80)}** - ${p.tracks.length} lagu`).join('\n')
+        + (playlists.length > shown.length ? `\n*...dan ${playlists.length - shown.length} playlist lainnya.*` : '');
       await ctx.followUp({ embeds: [createSuccessEmbed(`**Daftar Playlist-mu:**\n${desc}`)] });
       return;
 
@@ -123,6 +127,12 @@ const playlistCommand: Command = {
       }
 
       let queue = client.queues.get(ctx.guildId!);
+      const activeVoiceChannelId = client.shoukaku.connections.get(ctx.guildId!)?.channelId
+        || ctx.guild?.members.me?.voice.channelId;
+      if (queue && activeVoiceChannelId && activeVoiceChannelId !== voiceChannel.id) {
+        await ctx.followUp({ embeds: [createErrorEmbed(`Bot sedang digunakan di <#${activeVoiceChannelId}>. Bergabunglah ke voice channel tersebut.`)] });
+        return;
+      }
       if (!queue) {
         try {
           const player = await client.shoukaku.joinVoiceChannel({
@@ -139,21 +149,32 @@ const playlistCommand: Command = {
         }
       }
 
-      let loaded = 0;
+      const loadedTracks: Track[] = [];
       for (const uri of playlist.tracks) {
-        const query = uri.startsWith('http') ? uri : `ytsearch:${uri}`;
-        const resolved = await client.resolveTrack(query);
+        const query = uri.startsWith('http') ? uri : `ytmsearch:${uri}`;
+        const resolved = await client.resolveTrack(query, queue.player.node.name, true)
+          || (!uri.startsWith('http') ? await client.resolveTrack(`ytsearch:${uri}`, queue.player.node.name, true) : null);
+        const spotifyRef = parseSpotifyUrl(uri);
+        const mirror = !resolved && spotifyRef?.type === 'track'
+          ? await spotifyFallbackService.resolveTrack(client, spotifyRef, queue.player.node.name)
+          : null;
         if (resolved && resolved.result && resolved.result.data) {
           const resData = resolved.result.data;
           const track = resolved.result.loadType === 'playlist' ? (resData as any).tracks[0] : (Array.isArray(resData) ? resData[0] : resData);
           if (track) {
-            queue.enqueue(track);
-            loaded++;
+            loadedTracks.push(track);
           }
+        } else if (mirror) {
+          loadedTracks.push(mirror.track);
         }
       }
 
-      await ctx.followUp({ embeds: [createSuccessEmbed(`Berhasil memuat **${loaded}** lagu dari playlist **${name}** ke antrean!`)] });
+      if (loadedTracks.length === 0) {
+        await ctx.followUp({ embeds: [createErrorEmbed(`Tidak ada lagu dari playlist **${name}** yang berhasil dimuat.`)] });
+        return;
+      }
+      await queue.enqueueMany(loadedTracks);
+      await ctx.followUp({ embeds: [createSuccessEmbed(`Berhasil memuat **${loadedTracks.length}** lagu dari playlist **${name}** ke antrean!`)] });
     } else {
       await ctx.followUp({ embeds: [createErrorEmbed('Aksi tidak dikenal. Pilihan yang tersedia: `create`, `list`, `add`, atau `play`.')] });
     }

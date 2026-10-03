@@ -1,4 +1,4 @@
-import {  SlashCommandBuilder, StringSelectMenuBuilder, ActionRowBuilder, StringSelectMenuOptionBuilder, ComponentType  } from 'discord.js';
+import { SlashCommandBuilder, StringSelectMenuBuilder, ActionRowBuilder, StringSelectMenuOptionBuilder, ComponentType, MessageFlags } from 'discord.js';
 import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
 import { createErrorEmbed } from '../../utils/embeds';
@@ -10,15 +10,16 @@ const filterCommand: Command = {
     .setDescription('Mengatur filter audio untuk lagu yang sedang diputar.'),
   aliases: ['f'],
   execute: async (ctx: Context, client) => {
+    await ctx.deferReply({ flags: MessageFlags.Ephemeral });
     if (!await hasDJPermissions(ctx.interaction || ctx.message as any)) {
-      await ctx.reply({ embeds: [createErrorEmbed('Kamu membutuhkan role DJ untuk menggunakan perintah ini.')], ephemeral: true });
+      await ctx.reply({ embeds: [createErrorEmbed('Kamu membutuhkan role DJ untuk menggunakan perintah ini.')], flags: MessageFlags.Ephemeral });
       return;
     }
 
     const queue = client.queues.get(ctx.guildId!);
     
     if (!queue || !queue.current) {
-      await ctx.reply({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar.')], ephemeral: true });
+      await ctx.reply({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar.')], flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -50,50 +51,30 @@ const filterCommand: Command = {
 
     const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
 
-    const message = await ctx.reply({
+    const response = await ctx.reply({
       content: 'Silakan pilih filter audio:',
       components: [row],
-      ephemeral: true,
-      fetchReply: true,
+      flags: MessageFlags.Ephemeral,
+      withResponse: true,
     });
+    const message = response.resource?.message || response;
 
     const collector = message.createMessageComponentCollector({ componentType: ComponentType.StringSelect, time: 60000 });
 
     collector.on('collect', async (i: any) => {
+      await i.deferUpdate().catch(() => undefined);
       if (i.user.id !== ctx.author.id) {
-        await i.reply({ content: '❌ Hanya pemanggil perintah yang dapat mengatur filter ini.', ephemeral: true });
+        await i.followUp({ content: '❌ Hanya pemanggil perintah yang dapat mengatur filter ini.', flags: MessageFlags.Ephemeral });
         return;
       }
       const value = i.values[0];
-      
-      // Selalu clear filter lama sebelum menerapkan yang baru agar tidak bertumpuk
-      await queue.player.clearFilters();
 
-      switch (value) {
-        case 'none':
-          // Sudah di-clear di atas
-          break;
-        case 'bassboost':
-          await queue.player.setEqualizer([
-            { band: 0, gain: 0.6 },
-            { band: 1, gain: 0.67 },
-            { band: 2, gain: 0.67 },
-            { band: 3, gain: 0.3 },
-            { band: 4, gain: 0.1 },
-          ]);
-          break;
-        case 'nightcore':
-          await queue.player.setTimescale({ speed: 1.2999999523162842, pitch: 1.2999999523162842, rate: 1.0 });
-          break;
-        case 'vaporwave':
-          await queue.player.setTimescale({ speed: 0.8500000238418579, pitch: 0.800000011920929, rate: 1.0 });
-          break;
-        case 'karaoke':
-          await queue.player.setKaraoke({ level: 1.0, monoLevel: 1.0, filterBand: 220.0, filterWidth: 100.0 });
-          break;
+      try {
+        await queue.applyAudioFilter(value);
+        await i.editReply({ content: `✅ Filter **${value.toUpperCase()}** berhasil diterapkan!`, components: [] });
+      } catch {
+        await i.followUp({ content: '❌ Filter gagal diterapkan oleh node audio.', flags: MessageFlags.Ephemeral });
       }
-
-      await i.update({ content: `✅ Filter **${value.toUpperCase()}** berhasil diterapkan!`, components: [] });
     });
   },
 };

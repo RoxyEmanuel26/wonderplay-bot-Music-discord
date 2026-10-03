@@ -1,4 +1,4 @@
-import {  SlashCommandBuilder, EmbedBuilder  } from 'discord.js';
+import { EmbedBuilder, MessageFlags, SlashCommandBuilder } from 'discord.js';
 import { Context } from '../../structures/Context';
 import { Command } from '../../structures/Command';
 import { createErrorEmbed } from '../../utils/embeds';
@@ -13,7 +13,7 @@ const npCommand: Command = {
     const queue = client.queues.get(ctx.guildId!);
     
     if (!queue || !queue.current) {
-      await ctx.reply({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar.')], ephemeral: true });
+      await ctx.reply({ embeds: [createErrorEmbed('Tidak ada lagu yang sedang diputar.')], flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -29,7 +29,7 @@ const npCommand: Command = {
       .setDescription(`[**${currentTrack.info.title}**](${currentTrack.info.uri || ''})\n\n${timeString}`)
       .setColor('#D4AF37')
       .setThumbnail(currentTrack.info.artworkUrl || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&q=80&w=256&h=256')
-      .setFooter({ text: `Volume: ${queue.player.filters.volume ? Math.round(queue.player.filters.volume * 100) : 100}% | Loop: ${queue.loop}` });
+      .setFooter({ text: `Volume: ${Math.max(0, Math.min(100, Math.round(queue.player.volume)))}% | Loop: ${queue.loop}` });
 
     await ctx.reply({ embeds: [embed] });
   },
