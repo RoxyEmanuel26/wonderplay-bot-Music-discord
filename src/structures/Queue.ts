@@ -71,6 +71,7 @@ export class Queue {
   private currentFilter = 'none';
   private expectedMigrationCloseUntil = 0;
   private alternativeRecoveryAttempted = false;
+  private retryablePlaybackFailure: string | null = null;
   private readonly lyricsCooldowns = new Map<string, number>();
 
   constructor(client: AureliaClient, player: Player, textChannel: SendableChannels, guildId: string) {
@@ -108,6 +109,12 @@ export class Queue {
       logger.error({ guildId: this.guildId, track: this.current, exception: event.exception }, 'Lavalink Player Exception');
       const encodedAtEvent = this.current?.encoded;
       const generationAtEvent = this.playbackGeneration;
+      const exceptionMessage = [event.exception?.message, event.exception?.cause]
+        .filter((value): value is string => typeof value === 'string')
+        .join('\n');
+      if (this.current && this.isYouTubeTrack(this.current) && this.isYoutubeSourceUnavailable(exceptionMessage)) {
+        this.retryablePlaybackFailure = 'YouTube menolak stream pada semua client; menunggu autentikasi/node pulih';
+      }
       this.runDetached(async () => {
         if (!encodedAtEvent || !this.isCurrentEvent(encodedAtEvent, 'exception', generationAtEvent)) return;
         await this.recoverPlayback('exception');
@@ -220,6 +227,7 @@ export class Queue {
 
   public setVolume(level: number): Promise<void> {
     return this.runExclusive(async () => {
+      this.requirePlayerSession('mengubah volume');
       const volume = Math.max(0, Math.min(100, level));
       await this.player.setGlobalVolume(volume);
       if (volume > 0) this.lastNonZeroVolume = volume;
@@ -233,6 +241,7 @@ export class Queue {
       if (!this.current) {
         throw new Error('Tidak ada lagu yang dapat dijeda atau dilanjutkan.');
       }
+      this.requirePlayerSession(paused ? 'menjeda musik' : 'melanjutkan musik');
       await this.player.setPaused(paused);
       this.state = paused ? 'PAUSED' : 'PLAYING';
       this.changed();
@@ -262,7 +271,8 @@ export class Queue {
   /** Keep the player on the node that produced its encoded tracks. */
   public async bindToNode(nodeName: string): Promise<boolean> {
     if (this.disposed || this.current) return false;
-    if (this.player.node.name === nodeName) return true;
+    if (!this.client.isLavalinkNodeHealthy(nodeName)) return false;
+    if (this.player.node.name === nodeName) return this.hasUsablePlayerSession();
 
     this.player.track = null;
     try {
@@ -305,6 +315,41 @@ export class Queue {
     void this.runExclusive(operation).catch(() => undefined);
   }
 
+  /**
+   * Shoukaku briefly reports CONNECTED before it stores Lavalink's ready
+   * session id. A Player can also retain the old Node object after a node was
+   * recreated by the long-running reconnect watchdog. Refresh that reference
+   * and require both values before issuing any player REST request.
+   */
+  private hasUsablePlayerSession(): boolean {
+    const registered = this.client.shoukaku.nodes.get(this.player.node.name);
+    if (
+      registered
+      && registered !== this.player.node
+      && registered.state === 1
+      && registered.sessionId
+    ) {
+      this.player.node = registered;
+    }
+
+    return Boolean(this.player.node.state === 1 && this.player.node.sessionId);
+  }
+
+  private isSessionUnavailableError(error: unknown): boolean {
+    const candidate = error as { message?: unknown; path?: unknown; status?: unknown };
+    const message = typeof candidate?.message === 'string' ? candidate.message : '';
+    const path = typeof candidate?.path === 'string' ? candidate.path : '';
+    return /session not found/i.test(message)
+      || /\/sessions\/(?:null|undefined)(?:\/|$)/i.test(path)
+      || (candidate?.status === 404 && /\/sessions\//i.test(path));
+  }
+
+  private requirePlayerSession(operation: string): void {
+    if (this.hasUsablePlayerSession()) return;
+    if (this.current) this.beginRecovery(`control:${operation}:session-unavailable`);
+    throw new Error(`Node audio sedang menyambung kembali; belum dapat ${operation}.`);
+  }
+
   private async playNext() {
     if (this.disposed || this.current) return;
 
@@ -316,9 +361,13 @@ export class Queue {
     }
 
     if (!this.current && this.tracks.length === 0) {
-      await this.player.stopTrack().catch((error) => {
-        logger.warn({ error, guildId: this.guildId }, 'Failed to stop an empty queue');
-      });
+      if (this.hasUsablePlayerSession()) {
+        await this.player.stopTrack().catch((error) => {
+          if (!this.isSessionUnavailableError(error)) {
+            logger.warn({ error, guildId: this.guildId }, 'Failed to stop an empty queue');
+          }
+        });
+      }
       this.state = 'IDLE';
       this.recoveryReason = null;
       this.changed();
@@ -332,6 +381,18 @@ export class Queue {
     this.playbackGeneration++;
     this.attemptedNodes = new Set([this.player.node.name]);
     this.alternativeRecoveryAttempted = false;
+    this.retryablePlaybackFailure = null;
+
+    if (!this.hasUsablePlayerSession()) {
+      logger.warn({
+        guildId: this.guildId,
+        node: this.player.node.name,
+        reason,
+        title: track.info.title,
+      }, 'Playback retained until Lavalink provides a valid session id');
+      this.beginRecovery('session-unavailable');
+      return;
+    }
 
     try {
       await this.player.playTrack({ track: { encoded: track.encoded } });
@@ -351,6 +412,10 @@ export class Queue {
       this.changed();
     } catch (error) {
       logger.error({ error, guildId: this.guildId, reason, track, node: this.player.node.name }, 'Failed to start Lavalink track');
+      if (this.isSessionUnavailableError(error) || !this.hasUsablePlayerSession()) {
+        this.beginRecovery('session-unavailable');
+        return;
+      }
       await this.recoverPlayback('loadFailed');
     }
   }
@@ -409,6 +474,11 @@ export class Queue {
   private async recoverPlayback(cause: string) {
     if (this.disposed || !this.current) return;
 
+    // A reconnect watchdog can replace the Node instance while the Queue still
+    // owns the previous Player reference. Synchronize it before comparing node
+    // names or issuing a REST update.
+    this.hasUsablePlayerSession();
+
     const connectedNodes = Array.from(this.client.shoukaku.nodes.values())
       .filter((node) => this.client.isLavalinkNodeHealthy(node.name));
     if (connectedNodes.length === 0) {
@@ -450,6 +520,7 @@ export class Queue {
           });
           this.state = this.player.paused ? 'PAUSED' : 'PLAYING';
           this.recoveryReason = null;
+          this.retryablePlaybackFailure = null;
           this.recoveryAttempt = 0;
           this.scheduleControlPanelRefresh();
           logger.info({
@@ -465,14 +536,18 @@ export class Queue {
         }
       } catch (error) {
         logger.warn({ error, guildId: this.guildId, node: node.name }, 'Fallback Lavalink node failed');
+        if (this.isSessionUnavailableError(error)) {
+          this.beginRecovery(`session-unavailable:${node.name}`);
+          return;
+        }
       }
     }
 
     // YouTube can still return valid metadata/encoded tracks while every
-    // client fails later when requesting the actual audio stream. Only after
-    // the original video has been tried on every healthy node do we mirror
-    // the same title/artist to a different YouTube upload. This keeps one
-    // broken video from stopping the entire queue.
+    // client fails later when requesting the actual audio stream. Prefer a
+    // matching SoundCloud mirror before another YouTube upload: when YouTube
+    // blocks the Lavalink host, every video ID usually fails in the same way.
+    // This keeps a source-wide YouTube outage from stopping the entire queue.
     if (!this.alternativeRecoveryAttempted && this.isYouTubeTrack(this.current)) {
       this.alternativeRecoveryAttempted = true;
       const original = this.current;
@@ -489,7 +564,8 @@ export class Queue {
             alternativeIdentifier: alternative.info.identifier,
             from: this.player.node.name,
             to: node.name,
-          }, 'Original YouTube video failed on every node; using a matching alternate upload');
+            source: alternative.info.sourceName,
+          }, 'Original YouTube video failed on every node; using a matching cross-source mirror');
 
           this.player.track = null;
           const ready = this.player.node.name === node.name
@@ -501,6 +577,7 @@ export class Queue {
             pluginInfo: {
               ...(alternative.pluginInfo as Record<string, unknown>),
               youtubeAlternativeFor: original.info.uri || original.info.identifier,
+              playbackSource: alternative.info.uri,
             },
           };
           this.current = mirrored;
@@ -513,19 +590,31 @@ export class Queue {
             volume: Math.min(100, this.player.volume),
           });
           this.state = this.player.paused ? 'PAUSED' : 'PLAYING';
-          this.recoveryReason = `Video asli diblokir YouTube; audio dialihkan ke upload yang cocok`;
+          this.recoveryReason = alternative.info.sourceName === 'soundcloud'
+            ? 'Stream YouTube diblokir; audio dialihkan ke mirror SoundCloud'
+            : 'Video asli diblokir YouTube; audio dialihkan ke upload yang cocok';
           this.recoveryAttempt = 0;
+          this.retryablePlaybackFailure = null;
           this.scheduleControlPanelRefresh();
           this.changed();
           return;
         } catch (error) {
           logger.warn({ error, guildId: this.guildId, node: node.name }, 'Alternate YouTube recovery failed');
+          if (this.isSessionUnavailableError(error)) {
+            this.beginRecovery(`session-unavailable:${node.name}`);
+            return;
+          }
         }
       }
     }
 
     if (!Array.from(this.client.shoukaku.nodes.values()).some((node) => this.client.isLavalinkNodeHealthy(node.name))) {
       this.beginRecovery(cause);
+      return;
+    }
+
+    if (this.retryablePlaybackFailure) {
+      this.beginRecovery(this.retryablePlaybackFailure);
       return;
     }
 
@@ -539,6 +628,11 @@ export class Queue {
 
   private async movePlayer(nodeName: string, reason: string): Promise<boolean> {
     const from = this.player.node.name;
+    const destination = this.client.shoukaku.nodes.get(nodeName);
+    if (!destination || !this.client.isLavalinkNodeHealthy(nodeName)) {
+      logger.warn({ guildId: this.guildId, from, to: nodeName, reason }, 'Lavalink migration deferred until destination session is ready');
+      return false;
+    }
     // Shoukaku destroys the old Lavalink player during move(), which emits a
     // normal close (usually code 1000). That close belongs to this migration
     // and must not start a second recovery concurrently.
@@ -549,8 +643,7 @@ export class Queue {
       return moved;
     } catch (error) {
       logger.warn({ error, guildId: this.guildId, from, to: nodeName, reason }, 'Lavalink player move failed');
-      const destination = this.client.shoukaku.nodes.get(nodeName);
-      if (!destination || destination.state !== 1) {
+      if (!this.client.isLavalinkNodeHealthy(nodeName)) {
         this.expectedMigrationCloseUntil = 0;
         return false;
       }
@@ -601,26 +694,69 @@ export class Queue {
       || /(?:youtube\.com|youtu\.be)/i.test(track.info.uri || '');
   }
 
+  private isYoutubeSourceUnavailable(message: string): boolean {
+    return /all clients failed/i.test(message)
+      && /(?:requires login|no supported audio streams|sign in|confirm you(?:'|’)re not a bot)/i.test(message);
+  }
+
   private async resolveAlternativeTrackForNode(track: Track, nodeName: string): Promise<Track | null> {
-    const search = `${track.info.title} ${track.info.author}`.trim();
-    if (!search) return null;
+    const cleanTitle = track.info.title
+      .normalize('NFKC')
+      .replace(/(?:【.*?】|\[.*?\]|\(.*?\)|（.*?）|『.*?』|「.*?」)/gu, ' ')
+      .replace(/\b(?:official\s*)?(?:audio|video|lyrics?|lyric video|music video|mv)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const searches = [...new Set([
+      cleanTitle,
+      `${cleanTitle} ${track.info.author}`.trim(),
+      `${track.info.title} ${track.info.author}`.trim(),
+    ].filter(Boolean))];
+    if (searches.length === 0) return null;
 
-    for (const query of [`ytmsearch:${search}`, `ytsearch:${search}`]) {
-      const resolved = await this.client.resolveTrack(query, nodeName, false);
-      const data = resolved?.result.data;
-      if (!data) continue;
+    for (const prefix of ['scsearch:', 'ytmsearch:', 'ytsearch:']) {
+      for (const search of searches) {
+        const resolved = await this.client.resolveTrack(`${prefix}${search}`, nodeName, false);
+        const data = resolved?.result.data;
+        if (!data) continue;
 
-      const candidates = Array.isArray(data)
-        ? data
-        : (data as { tracks?: Track[] }).tracks || [data as Track];
-      const alternative = candidates.find((candidate) => (
-        candidate.info.identifier !== track.info.identifier
-        && !candidate.info.isStream
-      ));
-      if (alternative) return alternative;
+        const candidates = Array.isArray(data)
+          ? data
+          : (data as { tracks?: Track[] }).tracks || [data as Track];
+        const alternative = candidates
+          .filter((candidate) => (
+            candidate.info.identifier !== track.info.identifier
+            && !candidate.info.isStream
+          ))
+          .map((candidate) => ({
+            candidate,
+            score: this.scoreAlternativeTrack(track, candidate),
+          }))
+          .filter(({ score }) => score >= 0.45)
+          .sort((a, b) => b.score - a.score)[0]?.candidate;
+        if (alternative) return alternative;
+      }
     }
 
     return null;
+  }
+
+  private scoreAlternativeTrack(original: Track, candidate: Track): number {
+    const normalize = (value: string) => value
+      .normalize('NFKC')
+      .toLowerCase()
+      .replace(/\b(?:official|audio|video|lyrics?|lyric video|mv|music video|topic)\b/gi, ' ')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim();
+    const tokens = (value: string) => new Set(normalize(value).split(/\s+/).filter(Boolean));
+    const originalTokens = tokens(`${original.info.title} ${original.info.author}`);
+    const candidateTokens = tokens(`${candidate.info.title} ${candidate.info.author}`);
+    const overlap = [...originalTokens].filter((token) => candidateTokens.has(token)).length;
+    const tokenScore = originalTokens.size > 0 ? overlap / originalTokens.size : 0;
+    const durationDelta = Math.abs(original.info.length - candidate.info.length);
+    const durationScore = original.info.length > 0
+      ? Math.max(0, 1 - durationDelta / Math.max(original.info.length, 30_000))
+      : 0.5;
+    return tokenScore * 0.75 + durationScore * 0.25;
   }
 
   private async notifyPlaybackFailure(track: Track) {
@@ -647,12 +783,17 @@ export class Queue {
     this.attemptedNodes.clear();
     this.state = 'IDLE';
     this.recoveryReason = null;
+    this.retryablePlaybackFailure = null;
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
 
-    await this.player.stopTrack().catch((error) => {
-      logger.warn({ error, guildId: this.guildId }, 'Failed to stop Lavalink player cleanly');
-    });
+    if (this.hasUsablePlayerSession()) {
+      await this.player.stopTrack().catch((error) => {
+        if (!this.isSessionUnavailableError(error)) {
+          logger.warn({ error, guildId: this.guildId }, 'Failed to stop Lavalink player cleanly');
+        }
+      });
+    }
     if (persist) this.changed();
     this.scheduleControlPanelRefresh(0);
   }
@@ -673,7 +814,13 @@ export class Queue {
     this.recoveryAttempt++;
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = null;
-      this.runDetached(() => this.recoverPlayback(`retry:${reason}`));
+      if (this.current && this.retryablePlaybackFailure) {
+        this.attemptedNodes.clear();
+        this.alternativeRecoveryAttempted = false;
+      }
+      this.runDetached(() => this.current
+        ? this.recoverPlayback(`retry:${reason}`)
+        : this.playNext());
     }, delay);
     logger.warn({ guildId: this.guildId, reason, retryInMs: delay, current: this.current?.info.title }, 'Playback parked until a Lavalink node is available');
   }
@@ -688,7 +835,9 @@ export class Queue {
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
     this.attemptedNodes.delete(nodeName);
-    this.runDetached(() => this.recoverPlayback(`node-ready:${nodeName}`));
+    this.runDetached(() => this.current
+      ? this.recoverPlayback(`node-ready:${nodeName}`)
+      : this.playNext());
   }
 
   public toSnapshot(): QueueSnapshot | null {
@@ -727,7 +876,9 @@ export class Queue {
 
     if (!this.current) {
       this.state = 'IDLE';
-      await this.player.setGlobalVolume(snapshot.volume);
+      if (this.hasUsablePlayerSession()) {
+        await this.player.setGlobalVolume(snapshot.volume);
+      }
       this.changed();
       this.scheduleControlPanelRefresh(0);
       return;
@@ -736,6 +887,10 @@ export class Queue {
     this.state = snapshot.status === 'RECOVERING' ? 'RECOVERING' : snapshot.paused ? 'PAUSED' : 'PLAYING';
     if (snapshot.nodeName && this.player.node.name !== snapshot.nodeName) {
       await this.movePlayer(snapshot.nodeName, 'session-restore').catch(() => false);
+    }
+    if (!this.hasUsablePlayerSession()) {
+      this.beginRecovery('session-restore:session-unavailable');
+      return;
     }
     try {
       await this.player.playTrack({
@@ -851,7 +1006,10 @@ export class Queue {
       if (this.current?.info.isSeekable && !this.current.info.isStream) {
         const delta = action.endsWith('forward') ? 10000 : -10000;
         const position = Math.max(0, Math.min(this.current.info.length, this.player.position + delta));
-        await this.runExclusive(() => this.player.seekTo(position));
+        await this.runExclusive(async () => {
+          this.requirePlayerSession('menggeser posisi lagu');
+          await this.player.seekTo(position);
+        });
         this.changed();
         label = `menggeser posisi ke ${formatDuration(position)}`;
       }
@@ -988,6 +1146,7 @@ export class Queue {
 
   private async applyFilter(value: string) {
     await this.runExclusive(async () => {
+      this.requirePlayerSession('mengubah filter');
       await this.player.clearFilters();
       this.currentFilter = value;
       if (value === 'bassboost') {

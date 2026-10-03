@@ -7,6 +7,14 @@ import type { Queue, QueueSnapshot } from '../structures/Queue';
 
 const SAVE_DEBOUNCE_MS = 400;
 
+export function isDiscordSnowflake(value: string | null | undefined): value is string {
+  return typeof value === 'string' && /^\d{17,20}$/.test(value);
+}
+
+function persistenceEnabled() {
+  return process.env.PLAYBACK_PERSISTENCE_ENABLED !== 'false';
+}
+
 function toJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
@@ -26,6 +34,7 @@ export class PlaybackSessionService {
   private restoring = false;
 
   schedule(queue: Queue) {
+    if (!persistenceEnabled()) return;
     const existing = this.pending.get(queue.guildId);
     if (existing) clearTimeout(existing);
     this.pending.set(queue.guildId, setTimeout(() => {
@@ -41,6 +50,7 @@ export class PlaybackSessionService {
   }
 
   async save(queue: Queue) {
+    if (!persistenceEnabled()) return;
     const snapshot = queue.toSnapshot();
     if (!snapshot) return;
     await this.write(snapshot).catch((error) => {
@@ -90,11 +100,12 @@ export class PlaybackSessionService {
   }
 
   async flush(queues: Iterable<Queue>) {
+    if (!persistenceEnabled()) return;
     await Promise.all([...queues].map((queue) => this.save(queue)));
   }
 
   async restoreAll(client: AureliaClient) {
-    if (this.restoring || process.env.PLAYBACK_RECOVERY_ENABLED === 'false') return;
+    if (!persistenceEnabled() || this.restoring || process.env.PLAYBACK_RECOVERY_ENABLED === 'false') return;
     this.restoring = true;
     try {
       await db.playbackSession.deleteMany({ where: { status: 'DISCONNECTING' } });
@@ -103,6 +114,14 @@ export class PlaybackSessionService {
       });
 
       for (const session of sessions) {
+        if (!isDiscordSnowflake(session.guildId) || !isDiscordSnowflake(session.voiceChannelId)) {
+          logger.warn({
+            guildId: session.guildId,
+            voiceChannelId: session.voiceChannelId,
+          }, 'Deleting invalid playback session snapshot');
+          await this.delete(session.guildId);
+          continue;
+        }
         if (client.queues.has(session.guildId)) continue;
         try {
           const guild = await client.guilds.fetch(session.guildId);
@@ -113,7 +132,7 @@ export class PlaybackSessionService {
           }
 
           const textCandidates = [session.textChannelId, session.voiceChannelId, process.env.MUSIC_REQUEST_CHANNEL_ID]
-            .filter((id): id is string => Boolean(id));
+            .filter(isDiscordSnowflake);
           let textChannel = null;
           for (const id of textCandidates) {
             const channel = guild.channels.cache.get(id) || await guild.channels.fetch(id).catch(() => null);

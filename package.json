@@ -7,7 +7,7 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "build": "tsc",
-    "test": "npm run build && node --test dist/services/LyricsService.test.js dist/services/SpotifyFallbackService.test.js dist/structures/Queue.test.js dist/utils/cooldown.test.js",
+    "test": "npm run build && node --test dist/services/LyricsService.test.js dist/services/SpotifyFallbackService.test.js dist/structures/AureliaClient.test.js dist/structures/Queue.test.js dist/utils/cooldown.test.js",
     "healthcheck": "npm run build && node dist/scripts/healthcheck.js",
     "lint": "eslint src/**/*.ts",
     "format": "prettier --write \"src/**/*.ts\"",

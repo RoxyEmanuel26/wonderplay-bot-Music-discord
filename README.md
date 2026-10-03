@@ -74,11 +74,12 @@ dapat membaca isi pesan di channel request.
 
 YouTube dapat meminta login atau memblokir client tertentu sewaktu-waktu. Konfigurasi
 Lavalink menyertakan beberapa client playback (`ANDROID_VR`, `ANDROID_MUSIC`, `IOS`,
-`WEB`, `MWEB`, `WEBEMBEDDED`, dan `TVHTML5_SIMPLY`). Bot otomatis mencoba ulang video
+`WEB`, `MWEB`, `WEBEMBEDDED`, `TVHTML5_SIMPLY`, dan `TV`). Bot otomatis mencoba ulang video
 asli pada node cadangan. Jika video ID yang sama gagal di seluruh node tetapi metadata
-masih tersedia, bot mencari upload YouTube Music/YouTube lain dengan judul dan artis
-yang sama agar antrean tidak berhenti. Panel menandai saat audio dialihkan ke upload
-alternatif. Jika node milik sendiri tetap sering menerima pesan
+masih tersedia, bot lebih dulu mencari mirror SoundCloud yang cocok, kemudian upload
+YouTube Music/YouTube lain dengan judul, artis, dan durasi yang serupa agar antrean
+tidak berhenti. Panel menandai sumber audio fallback yang dipakai. Jika node milik
+sendiri tetap sering menerima pesan
 `This video requires login`, OAuth dapat diaktifkan melalui variabel
 `YOUTUBE_OAUTH_*` di `.env`. Gunakan akun cadangan karena integrasi ini dapat terkena
 rate limit atau penangguhan akun. Secara default bot berjalan dalam mode Lavalink
@@ -87,6 +88,32 @@ Pengaman `LAVALINK_PRIVATE_ONLY` juga mencegah nilai lama dari environment panel
 hosting mengaktifkan Node-2/Node-3. Untuk mengaktifkan node publik lagi, kedua nilai
 harus sengaja diubah menjadi `LAVALINK_PRIVATE_ONLY=false` dan
 `LAVALINK_USE_PUBLIC_NODES=true`.
+
+`/v4/loadtracks` yang berhasil hanya membuktikan metadata video dapat dibaca; itu
+belum membuktikan URL audio dapat diambil. Gejala `AllClientsFailedException`,
+`This video requires login`, atau `No supported audio streams available` berasal
+dari pembatasan YouTube terhadap client/IP Lavalink, bukan dari PostgreSQL. Client
+`TV` dipakai ketika OAuth aktif. Jika tidak ingin memakai OAuth, fallback SoundCloud
+memungkinkan antrean terus berjalan ketika tersedia kecocokan yang cukup kuat.
+Fallback ini terutama berguna untuk musik. Video non-musik panjang, vlog, berita,
+atau video kuliner biasanya tidak mempunyai mirror SoundCloud yang cocok. Jika tidak
+ada kandidat aman, bot mempertahankan track dalam status `RECOVERING` dan tidak lagi
+menghapusnya atau mengubah panel menjadi `IDLE`.
+
+Untuk pertama kali menghubungkan OAuth YouTube pada server Lavalink:
+
+```env
+YOUTUBE_OAUTH_ENABLED=true
+YOUTUBE_OAUTH_REFRESH_TOKEN=
+YOUTUBE_OAUTH_SKIP_INITIALIZATION=false
+```
+
+Restart Lavalink, lalu ikuti URL dan kode perangkat yang ditampilkan oleh
+`YoutubeOauth2Handler` pada console menggunakan akun YouTube cadangan. Setelah token
+terbentuk, simpan token tersebut hanya di environment server Lavalink, set
+`YOUTUBE_OAUTH_SKIP_INITIALIZATION=true`, dan restart kembali. Endpoint `GET /youtube`
+harus mengembalikan refresh token non-null. Jangan kirim token ke chat atau commit ke
+Git.
 
 Dalam mode pribadi saja, panel hanya akan menampilkan `Node-1 (Custom/Local)`. Jika
 node pribadi mati atau tidak dapat mengambil stream YouTube, current track dan queue
@@ -116,6 +143,7 @@ SPOTIFY_PLAYLIST_MAX_TRACKS=500
 SPOTIFY_MIRROR_CONCURRENCY=3
 PLAYBACK_RECOVERY_ENABLED=true
 PLAYBACK_CHECKPOINT_INTERVAL_MS=5000
+PLAYBACK_PERSISTENCE_ENABLED=true
 ```
 
 Untuk membuat refresh token, tambahkan redirect URI
@@ -137,6 +165,11 @@ node Lavalink siap, lalu otomatis rejoin dan melanjutkan posisi terakhir. `/stop
 hanya menghentikan musik dan membersihkan antrean; `/disconnect` adalah perintah yang
 mengeluarkan bot serta menghapus sesi.
 
+`PLAYBACK_PERSISTENCE_ENABLED` harus tetap `true` pada deployment. Test suite
+mematikannya di proses test agar guild palsu seperti `guild` tidak pernah masuk ke
+database. Saat startup, snapshot dengan guild/voice ID yang bukan Discord snowflake
+akan dibuang otomatis sebelum bot mencoba memanggil Discord API.
+
 ### Deployment Lavalink di VPS / Pterodactyl
 
 Folder `lavalink/` ditujukan untuk Lavalink `4.2.2` dengan Java 17 atau lebih baru.
@@ -153,6 +186,12 @@ SPOTIFY_CLIENT_SECRET=secret_aplikasi_spotify
 SPOTIFY_COUNTRY_CODE=ID
 SPOTIFY_SP_DC=opsional_dan_bukan_pengganti_refresh_token_oauth
 ```
+
+`application.yml` mengimpor `optional:file:./.env[.properties]`, sehingga file
+`/home/container/.env` pada server Lavalink dapat dipakai walaupun Java tidak
+memiliki dotenv bawaan. Pastikan `.env`, `application.yml`, dan `Lavalink.jar`
+berada dalam direktori kerja yang sama. Nilai dari Startup Variables panel dapat
+mengoverride nilai file tersebut.
 
 Jika bot dan Lavalink berada pada dua server NuraHost yang berbeda, environment
 keduanya **tidak dibagikan otomatis**. Isi `LAVALINK_SERVER_PASSWORD` pada server
@@ -171,11 +210,20 @@ LAVALINK_RECONNECT_INTERVAL_SECONDS=5
 LAVALINK_RECONNECT_CYCLE_DELAY_MS=30000
 ```
 
+Setelah retry internal Shoukaku habis, watchdog bot membuat ulang objek node dan
+memulai siklus berikutnya tanpa batas. Restart singkat maupun downtime Lavalink yang
+panjang tidak memerlukan restart bot; antrean tetap berada dalam status pemulihan dan
+akan dibangunkan oleh event `ready` ketika node kembali tersedia.
+
 Spotify Development Mode tetap membatasi Web API ke pemilik aplikasi yang memiliki
 Premium aktif; bot tidak mencoba melewati pembatasan tersebut. `spDc` LavaSrc bukan
 pengganti OAuth playlist dan terutama digunakan untuk fitur token akun/lirik. Karena
 client secret dan cookie yang lama sudah pernah ditampilkan, rotasi client secret dan
 logout seluruh sesi Spotify sebelum menggunakan konfigurasi baru.
+Sejak pembatasan Development Mode 2026, isi playlist hanya tersedia bila akun OAuth
+merupakan pemilik atau kolaborator playlist. Playlist publik milik akun lain dan
+playlist yang hanya diikuti tidak dapat diimpor; salin lagu-lagunya ke playlist baru
+milik akun OAuth sebelum mengirim link tersebut ke bot.
 Setelah mengganti plugin atau konfigurasi, lakukan restart penuh pada
 Lavalink dan restart bot agar tidak ada encoded track lama dari versi/source manager
 yang berbeda.
@@ -200,8 +248,11 @@ npm run healthcheck
 ```
 
 Perintah ini memvalidasi PostgreSQL, Redis, token Discord, `/version` dan `/v4/info`
-Lavalink, resolve URL/pencarian YouTube, resolve track Spotify, Spotify oEmbed/OAuth,
-dan LRCLIB tanpa membuka koneksi voice atau login sebagai proses bot kedua. Jika
+Lavalink, resolve URL/pencarian YouTube, pengambilan stream audio YouTube, pencarian
+fallback SoundCloud, resolve track Spotify, Spotify oEmbed/OAuth, dan LRCLIB tanpa
+membuka koneksi voice atau login sebagai proses bot kedua. Kegagalan stream YouTube
+ditampilkan sebagai `WARN` (bot masih dapat memakai SoundCloud), bukan `PASS` palsu
+hanya karena metadata tersedia. Jika
 Lavalink menghasilkan `401`/`403`, samakan `LAVALINK_PASSWORD` pada bot dengan nilai
 efektif `LAVALINK_SERVER_PASSWORD` di panel Lavalink, lalu restart penuh kedua service.
 

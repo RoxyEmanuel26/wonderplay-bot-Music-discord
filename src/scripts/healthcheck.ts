@@ -5,17 +5,23 @@ import { redis } from '../database/redis';
 type CheckResult = {
   name: string;
   ok: boolean;
+  required: boolean;
   detail: string;
 };
 
 const results: CheckResult[] = [];
 
-async function check(name: string, operation: () => Promise<string>) {
+async function check(name: string, operation: () => Promise<string>, required = true) {
   try {
-    results.push({ name, ok: true, detail: await operation() });
+    results.push({ name, ok: true, required, detail: await operation() });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    results.push({ name, ok: false, detail: detail.replaceAll(process.env.LAVALINK_PASSWORD || '\0', '[redacted]') });
+    results.push({
+      name,
+      ok: false,
+      required,
+      detail: detail.replaceAll(process.env.LAVALINK_PASSWORD || '\0', '[redacted]'),
+    });
   }
 }
 
@@ -93,9 +99,10 @@ async function main() {
   });
 
   const identifiers = [
-    ['YouTube URL', 'https://www.youtube.com/watch?v=lP9G_HluZUI'],
+    ['YouTube URL', 'https://www.youtube.com/watch?v=EupWletn-Vo'],
     ['YouTube Music search', 'ytmsearch:lagu sedih'],
     ['YouTube search', 'ytsearch:lagu sedih'],
+    ['SoundCloud fallback search', 'scsearch:lagu sedih'],
     ['Spotify track', 'https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl'],
   ] as const;
   for (const [name, identifier] of identifiers) {
@@ -104,6 +111,19 @@ async function main() {
       return summarizeLoadResult(await response.json());
     });
   }
+
+  // /v4/loadtracks may return valid metadata even when every YouTube client
+  // later fails to obtain an audio URL. The plugin stream route exercises the
+  // actual format/client selection without joining a Discord voice channel.
+  await check('YouTube audio stream', async () => {
+    const response = await lavalinkRequest('/youtube/stream/EupWletn-Vo');
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('respons stream tidak memiliki body audio');
+    const first = await reader.read();
+    await reader.cancel();
+    if (first.done || !first.value?.byteLength) throw new Error('stream audio kosong');
+    return `${response.headers.get('content-type') || 'audio'}, chunk=${first.value.byteLength} byte`;
+  }, false);
 
   await check('Spotify oEmbed', async () => {
     const url = new URL('https://open.spotify.com/oembed');
@@ -145,9 +165,10 @@ async function main() {
   });
 
   for (const result of results) {
-    process.stdout.write(`${result.ok ? 'PASS' : 'FAIL'} ${result.name}: ${result.detail}\n`);
+    const status = result.ok ? 'PASS' : result.required ? 'FAIL' : 'WARN';
+    process.stdout.write(`${status} ${result.name}: ${result.detail}\n`);
   }
-  process.exitCode = results.some((result) => !result.ok) ? 1 : 0;
+  process.exitCode = results.some((result) => !result.ok && result.required) ? 1 : 0;
 }
 
 void main().finally(async () => {

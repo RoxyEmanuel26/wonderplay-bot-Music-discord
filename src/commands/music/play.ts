@@ -80,7 +80,7 @@ const playCommand: Command = {
       return;
     }
 
-    const hasActiveNode = client.shoukaku?.nodes && Array.from(client.shoukaku.nodes.values()).some(n => n.state === 1);
+    const hasActiveNode = client.hasReadyLavalinkNode();
     if (!hasActiveNode) {
       await ctx.reply({ embeds: [createErrorEmbed(t('noNode', lang))], flags: MessageFlags.Ephemeral });
       return;

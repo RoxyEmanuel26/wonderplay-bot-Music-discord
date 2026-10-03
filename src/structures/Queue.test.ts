@@ -5,14 +5,22 @@ import { Player, Track } from 'shoukaku';
 import { Queue } from './Queue';
 import { AureliaClient } from './AureliaClient';
 import { db } from '../database/db';
-import { playbackSessionService } from '../services/PlaybackSessionService';
+import { isDiscordSnowflake, playbackSessionService } from '../services/PlaybackSessionService';
+
+// Queue mutasi menjadwalkan checkpoint secara otomatis. Unit test tidak boleh
+// pernah menulis snapshot guild palsu ke database yang dikonfigurasi pengguna.
+process.env.PLAYBACK_PERSISTENCE_ENABLED = 'false';
 
 after(async () => {
   await db.$disconnect();
 });
 
 class FakePlayer extends EventEmitter {
-  public node = { name: 'node-a' };
+  public node: { name: string; state: number; sessionId: string | null } = {
+    name: 'node-a',
+    state: 1,
+    sessionId: 'session-a',
+  };
   public volume = 100;
   public paused = false;
   public position = 0;
@@ -21,12 +29,15 @@ class FakePlayer extends EventEmitter {
   public emitCloseOnMove = false;
   public failVolume = false;
   public filterCalls: string[] = [];
+  public stopCalls = 0;
+  public playError: unknown = null;
 
   async playTrack(options: { track: { encoded: string } }) {
     this.played.push(options.track.encoded);
+    if (this.playError) throw this.playError;
   }
 
-  async stopTrack() {}
+  async stopTrack() { this.stopCalls++; }
   async setGlobalVolume(volume: number) {
     if (this.failVolume) throw new Error('volume rejected');
     this.volume = volume;
@@ -44,7 +55,7 @@ class FakePlayer extends EventEmitter {
   }
 }
 
-function makeTrack(encoded: string): Track {
+function makeTrack(encoded: string, sourceName = 'youtube', title = `Track ${encoded}`): Track {
   return {
     encoded,
     info: {
@@ -54,11 +65,11 @@ function makeTrack(encoded: string): Track {
       length: 180000,
       isStream: false,
       position: 0,
-      title: `Track ${encoded}`,
+      title,
       uri: `https://example.test/${encoded}`,
       artworkUrl: undefined,
       isrc: undefined,
-      sourceName: 'youtube',
+      sourceName,
     },
     pluginInfo: {},
   };
@@ -88,7 +99,7 @@ function createQueue() {
     resolveTrack: async (_query: string): Promise<unknown> => null,
     isLavalinkNodeHealthy(name: string) {
       const node = this.shoukaku.nodes.get(name);
-      return Boolean(node && node.state === 1);
+      return Boolean(node && node.state === 1 && node.sessionId);
     },
   };
   const queue = new Queue(
@@ -118,6 +129,13 @@ function makeControlInteraction(guild: unknown, customId: string, values: string
 async function settle(queue: Queue) {
   await (queue as unknown as { operation: Promise<void> }).operation;
 }
+
+test('playback persistence accepts Discord snowflakes and rejects test identifiers', () => {
+  assert.equal(isDiscordSnowflake('1343830402061697097'), true);
+  assert.equal(isDiscordSnowflake('1555093877772255296'), true);
+  assert.equal(isDiscordSnowflake('guild'), false);
+  assert.equal(isDiscordSnowflake(''), false);
+});
 
 test('natural finish advances exactly once to the next track', async () => {
   const { queue, player } = createQueue();
@@ -177,16 +195,95 @@ test('loadFailed keeps current and queue intact while every node is offline', as
   queue.dispose();
 });
 
+test('a null Lavalink session parks playback without consuming the queue or calling stopTrack', async () => {
+  const { queue, player } = createQueue();
+  player.node.sessionId = null;
+
+  await queue.enqueueMany([makeTrack('one'), makeTrack('two')]);
+
+  assert.equal(queue.current?.encoded, 'one');
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['two']);
+  assert.equal(queue.state, 'RECOVERING');
+  assert.deepEqual(player.played, []);
+  assert.equal(player.stopCalls, 0);
+  queue.dispose();
+});
+
+test('node ready replaces a stale null-session node reference and resumes the retained track', async () => {
+  const { queue, player, client } = createQueue();
+  const original = makeTrack('one');
+  const replacement = makeTrack('one-resolved');
+  player.node.sessionId = null;
+
+  await queue.enqueueMany([original, makeTrack('two')]);
+  client.shoukaku.nodes.set('node-a', {
+    name: 'node-a',
+    state: 1,
+    sessionId: 'new-session',
+    penalties: 0,
+  });
+  client.resolveTrack = async () => ({ result: { data: replacement }, node: { name: 'node-a' } });
+  queue.handleNodeReady('node-a');
+  await settle(queue);
+
+  assert.equal(queue.current?.encoded, 'one-resolved');
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['two']);
+  assert.equal(queue.state, 'PLAYING');
+  assert.deepEqual(player.played, ['one-resolved']);
+  assert.equal(player.node.sessionId, 'new-session');
+  queue.dispose();
+});
+
+test('a 404 stale-session failure retains current and remaining tracks for reconnect', async () => {
+  const { queue, player } = createQueue();
+  player.playError = {
+    name: 'RestError',
+    message: 'Session not found',
+    status: 404,
+    path: '/v4/sessions/stale-session/players/guild',
+  };
+
+  await queue.enqueueMany([makeTrack('one'), makeTrack('two')]);
+
+  assert.equal(queue.current?.encoded, 'one');
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['two']);
+  assert.equal(queue.state, 'RECOVERING');
+  assert.deepEqual(player.played, ['one']);
+  assert.equal(player.stopCalls, 0);
+  queue.dispose();
+});
+
 test('loadFailed skips only a bad track when a healthy node cannot resolve it', async () => {
   const { queue, player, client } = createQueue();
   const first = makeTrack('one');
   const second = makeTrack('two');
-  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, penalties: 0 });
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
   await queue.enqueueMany([first, second]);
   player.emit('end', { reason: 'loadFailed', track: first });
   await settle(queue);
   assert.equal(queue.current?.encoded, 'two');
   assert.deepEqual(player.played, ['one', 'two']);
+  queue.dispose();
+});
+
+test('source-wide YouTube login failure parks the track instead of deleting it', async () => {
+  const { queue, player, client } = createQueue();
+  const blocked = makeTrack('login-required');
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  await queue.enqueue(blocked);
+
+  player.emit('exception', {
+    track: blocked,
+    exception: {
+      message: '(yts.version: 1.18.2) All clients failed to load the item. Client [ANDROID_VR] failed: This video requires login. Client [WEB] failed: No supported audio streams available',
+      cause: 'AllClientsFailedException',
+    },
+  });
+  await settle(queue);
+
+  assert.equal(queue.current, blocked);
+  assert.equal(queue.state, 'RECOVERING');
+  assert.match(queue.recoveryReason || '', /YouTube menolak stream/);
   queue.dispose();
 });
 
@@ -196,7 +293,7 @@ test('loadFailed after an automatic node move re-resolves the current track on t
   const replacement = makeTrack('one-on-node-b');
   await queue.enqueue(original);
   player.node.name = 'node-b';
-  client.shoukaku.nodes.set('node-b', { name: 'node-b', state: 1, penalties: 0 });
+  client.shoukaku.nodes.set('node-b', { name: 'node-b', state: 1, sessionId: 'session-b', penalties: 0 });
   client.resolveTrack = async () => ({ result: { data: replacement }, node: { name: 'node-b' } });
   player.emit('end', { reason: 'loadFailed', track: original });
   await settle(queue);
@@ -209,8 +306,8 @@ test('normal close emitted by player.move does not start a second recovery', asy
   const { queue, player, client } = createQueue();
   const original = makeTrack('one');
   const replacement = makeTrack('one-on-node-b');
-  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, penalties: 0 });
-  client.shoukaku.nodes.set('node-b', { name: 'node-b', state: 1, penalties: 1 });
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  client.shoukaku.nodes.set('node-b', { name: 'node-b', state: 1, sessionId: 'session-b', penalties: 1 });
   client.resolveTrack = async () => ({ result: { data: replacement }, node: { name: 'node-b' } });
   player.emitCloseOnMove = true;
 
@@ -229,7 +326,7 @@ test('a YouTube video that fails on every node is mirrored to a different matchi
   const { queue, player, client } = createQueue();
   const original = makeTrack('blocked-video');
   const alternative = makeTrack('working-upload');
-  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, penalties: 0 });
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
   client.resolveTrack = async (query: string) => {
     if (!query.startsWith('ytmsearch:') && !query.startsWith('ytsearch:')) return null;
     return { result: { data: [original, alternative] }, node: { name: 'node-a' } };
@@ -246,6 +343,60 @@ test('a YouTube video that fails on every node is mirrored to a different matchi
     original.info.uri,
   );
   assert.deepEqual(player.played, ['blocked-video', 'working-upload']);
+  queue.dispose();
+});
+
+test('a source-wide YouTube failure prefers a matching SoundCloud mirror', async () => {
+  const { queue, player, client } = createQueue();
+  const original = makeTrack('blocked-video', 'youtube', 'Just Love You');
+  const soundcloud = makeTrack('soundcloud-mirror', 'soundcloud', 'Just Love You');
+  soundcloud.info.author = 'Artist';
+  soundcloud.info.uri = 'https://soundcloud.com/artist/just-love-you';
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  client.resolveTrack = async (query: string) => {
+    if (!query.startsWith('scsearch:')) return null;
+    return { result: { data: [soundcloud] }, node: { name: 'node-a' } };
+  };
+
+  await queue.enqueue(original);
+  player.emit('end', { reason: 'loadFailed', track: original });
+  await settle(queue);
+
+  assert.equal(queue.current?.encoded, 'soundcloud-mirror');
+  assert.equal(queue.current?.info.sourceName, 'soundcloud');
+  assert.equal(queue.state, 'PLAYING');
+  assert.match(queue.recoveryReason || '', /SoundCloud/);
+  assert.deepEqual(player.played, ['blocked-video', 'soundcloud-mirror']);
+  queue.dispose();
+});
+
+test('cross-source fallback strips YouTube promotional suffixes before searching', async () => {
+  const { queue, player, client } = createQueue();
+  const original = makeTrack(
+    'blocked-video',
+    'youtube',
+    '丁芙妮 - 只是太愛你『我們的愛快要窒息 不是故意』【Lyrics Video】',
+  );
+  original.info.author = 'Boba Beats';
+  original.info.length = 248000;
+  const soundcloud = makeTrack('soundcloud-mirror', 'soundcloud', '丁芙妮 - 只是太愛你');
+  soundcloud.info.author = 'EileenLove';
+  soundcloud.info.length = 248000;
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  const queries: string[] = [];
+  client.resolveTrack = async (query: string) => {
+    queries.push(query);
+    if (query !== 'scsearch:丁芙妮 - 只是太愛你') return null;
+    return { result: { data: [soundcloud] }, node: { name: 'node-a' } };
+  };
+
+  await queue.enqueue(original);
+  player.emit('end', { reason: 'loadFailed', track: original });
+  await settle(queue);
+
+  assert.equal(queries[0], 'scsearch:丁芙妮 - 只是太愛你');
+  assert.equal(queue.current?.encoded, 'soundcloud-mirror');
+  assert.deepEqual(player.played, ['blocked-video', 'soundcloud-mirror']);
   queue.dispose();
 });
 
@@ -276,7 +427,7 @@ test('a ready node wakes a parked queue and resumes the retained track', async (
   player.emit('end', { reason: 'loadFailed', track: original });
   await settle(queue);
   assert.equal(queue.state, 'RECOVERING');
-  client.shoukaku.nodes.set('node-b', { name: 'node-b', state: 1, penalties: 0 });
+  client.shoukaku.nodes.set('node-b', { name: 'node-b', state: 1, sessionId: 'session-b', penalties: 0 });
   client.resolveTrack = async () => ({ result: { data: replacement }, node: { name: 'node-b' } });
   queue.handleNodeReady('node-b');
   await settle(queue);

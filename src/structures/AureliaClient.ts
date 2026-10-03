@@ -3,7 +3,7 @@ import { Command } from './Command';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../utils/logger';
-import { Shoukaku, Connectors } from 'shoukaku';
+import { Shoukaku, Connectors, type NodeOption } from 'shoukaku';
 import { Queue } from './Queue';
 import { playbackSessionService } from '../services/PlaybackSessionService';
 
@@ -15,6 +15,8 @@ export class AureliaClient extends Client {
   private discordReady = false;
   private restorationStarted = false;
   private readonly nodeReconnectTimers = new Map<string, NodeJS.Timeout>();
+  private readonly lavalinkNodeConfigs = new Map<string, NodeOption>();
+  private readonly nodeReconnectCycles = new Map<string, number>();
 
   constructor() {
     super({
@@ -88,6 +90,8 @@ export class AureliaClient extends Client {
       throw new Error('Tidak ada Lavalink node yang dikonfigurasi. Isi LAVALINK_URL untuk menggunakan Lavalink pribadi.');
     }
 
+    for (const node of nodes) this.lavalinkNodeConfigs.set(node.name, { ...node });
+
     logger.info({
       customNodeConfigured: Boolean(customUrl),
       privateOnly,
@@ -111,7 +115,11 @@ export class AureliaClient extends Client {
       restTimeout: 10000,
       nodeResolver: (availableNodes) => {
         const connected = Array.from(availableNodes.values())
-          .filter((node) => node.state === 1 && !this.unhealthyLavalinkNodes.has(node.name));
+          .filter((node) => (
+            node.state === 1
+            && Boolean(node.sessionId)
+            && !this.unhealthyLavalinkNodes.has(node.name)
+          ));
         return connected.find((node) => node.name === customNodeName)
           || connected.sort((a, b) => a.penalties - b.penalties)[0];
       },
@@ -119,6 +127,7 @@ export class AureliaClient extends Client {
 
     this.shoukaku.on('ready', async (name) => {
       this.clearNodeReconnect(name);
+      this.nodeReconnectCycles.delete(name);
       this.unhealthyLavalinkNodes.delete(name);
       const node = this.shoukaku.nodes.get(name);
       const info = node ? await node.rest.getLavalinkInfo().catch((error) => {
@@ -150,14 +159,16 @@ export class AureliaClient extends Client {
         ? 'Autentikasi Lavalink ditolak; samakan LAVALINK_PASSWORD bot dengan LAVALINK_SERVER_PASSWORD pada server Lavalink'
         : 'Lavalink node ditandai unhealthy');
       for (const queue of this.queues.values()) queue.handleNodeUnavailable(name);
+      this.scheduleNodeReconnect(name);
     });
     this.shoukaku.on('reconnecting', (name, reconnectsLeft, intervalSeconds) => {
       logger.warn({ node: name, reconnectsLeft, intervalSeconds }, 'Mencoba menyambungkan ulang node Lavalink');
     });
     this.shoukaku.on('close', (name, code, reason) => {
       this.unhealthyLavalinkNodes.add(name);
-      logger.warn(`Lavalink Cluster: Node [${name}] terputus (Code: ${code}, Reason: ${reason || 'None'}). Otomatis failover ke node lain.`);
+      logger.warn(`Lavalink Cluster: Node [${name}] terputus (Code: ${code}, Reason: ${reason || 'None'}). Pemulihan otomatis dimulai.`);
       for (const queue of this.queues.values()) queue.handleNodeUnavailable(name);
+      this.scheduleNodeReconnect(name);
     });
     this.shoukaku.on('disconnect', (name, movedPlayers) => {
       this.unhealthyLavalinkNodes.add(name);
@@ -178,14 +189,57 @@ export class AureliaClient extends Client {
     const delayMs = readIntegerEnv('LAVALINK_RECONNECT_CYCLE_DELAY_MS', 30000, 5000, 3600000);
     const timer = setTimeout(() => {
       this.nodeReconnectTimers.delete(name);
-      const node = this.shoukaku.nodes.get(name);
-      if (!node || node.state === 1) return;
-      void node.connect().catch((error) => {
-        logger.warn({ error, node: name }, 'Gagal memulai siklus rekoneksi Lavalink berikutnya');
-        this.scheduleNodeReconnect(name);
-      });
+      void this.runNodeReconnectCycle(name);
     }, delayMs);
     this.nodeReconnectTimers.set(name, timer);
+    logger.warn({ node: name, retryInMs: delayMs }, 'Watchdog menjadwalkan siklus rekoneksi Lavalink tanpa batas');
+  }
+
+  private async runNodeReconnectCycle(name: string) {
+    const existing = this.shoukaku.nodes.get(name);
+    if (existing?.state === 1 && existing.sessionId) {
+      this.clearNodeReconnect(name);
+      return;
+    }
+
+    // Shoukaku sets CONNECTED immediately before assigning the session id from
+    // Lavalink's ready payload. Do not start a competing websocket during that
+    // short window; keep the watchdog alive until REST requests are safe.
+    if (existing?.state === 1 && !existing.sessionId) {
+      this.scheduleNodeReconnect(name);
+      return;
+    }
+
+    // A node that is already CONNECTING/DISCONNECTING owns its current retry
+    // cycle. Poll it again later instead of creating a competing websocket.
+    if (existing && existing.state !== 3) {
+      this.scheduleNodeReconnect(name);
+      return;
+    }
+
+    const cycle = (this.nodeReconnectCycles.get(name) || 0) + 1;
+    this.nodeReconnectCycles.set(name, cycle);
+    try {
+      if (existing) {
+        logger.warn({ node: name, cycle }, 'Watchdog memulai ulang koneksi node Lavalink');
+        await existing.connect();
+      } else {
+        const config = this.lavalinkNodeConfigs.get(name);
+        if (!config) {
+          logger.error({ node: name }, 'Konfigurasi node Lavalink tidak ditemukan; watchdog tidak dapat membuat ulang node');
+          return;
+        }
+        // Shoukaku 4.3 removes a Node from its map after its finite internal
+        // retries are exhausted. Re-adding it starts a fresh finite cycle; the
+        // watchdog will repeat this forever until a ready event is received.
+        logger.warn({ node: name, cycle }, 'Watchdog membuat ulang node Lavalink yang telah dihapus Shoukaku');
+        this.shoukaku.addNode({ ...config });
+      }
+    } catch (error) {
+      logger.warn({ error, node: name, cycle }, 'Siklus rekoneksi Lavalink watchdog gagal');
+    } finally {
+      if (!this.isLavalinkNodeHealthy(name)) this.scheduleNodeReconnect(name);
+    }
   }
 
   public markDiscordReady() {
@@ -195,12 +249,22 @@ export class AureliaClient extends Client {
 
   public isLavalinkNodeHealthy(name: string): boolean {
     const node = this.shoukaku.nodes.get(name);
-    return Boolean(node && node.state === 1 && !this.unhealthyLavalinkNodes.has(name));
+    return Boolean(
+      node
+      && node.state === 1
+      && node.sessionId
+      && !this.unhealthyLavalinkNodes.has(name),
+    );
+  }
+
+  public hasReadyLavalinkNode(): boolean {
+    return Array.from(this.shoukaku.nodes.values())
+      .some((node) => this.isLavalinkNodeHealthy(node.name));
   }
 
   private async tryRestorePlaybackSessions() {
     if (this.restorationStarted || !this.discordReady || process.env.PLAYBACK_RECOVERY_ENABLED === 'false') return;
-    if (!Array.from(this.shoukaku.nodes.values()).some((node) => node.state === 1)) return;
+    if (!this.hasReadyLavalinkNode()) return;
     this.restorationStarted = true;
     await playbackSessionService.restoreAll(this).catch((error) => {
       logger.error({ error }, 'Playback session restoration failed');
@@ -216,7 +280,7 @@ export class AureliaClient extends Client {
 
     const idealNode = this.shoukaku.getIdealNode();
     let connectedNodes = Array.from(this.shoukaku.nodes.values())
-      .filter((node) => node.state === 1 && !this.unhealthyLavalinkNodes.has(node.name))
+      .filter((node) => this.isLavalinkNodeHealthy(node.name))
       .sort((a, b) => {
         if (a.name === preferredNodeName) return -1;
         if (b.name === preferredNodeName) return 1;

@@ -120,7 +120,7 @@ const playlistCommand: Command = {
         return;
       }
 
-      const hasActiveNode = client.shoukaku?.nodes && Array.from(client.shoukaku.nodes.values()).some(n => n.state === 1);
+      const hasActiveNode = client.hasReadyLavalinkNode();
       if (!hasActiveNode) {
         await ctx.followUp({ embeds: [createErrorEmbed('Tidak ada node audio Lavalink yang tersedia saat ini.')] });
         return;

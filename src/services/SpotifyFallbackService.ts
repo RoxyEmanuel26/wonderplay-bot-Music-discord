@@ -258,9 +258,11 @@ export class SpotifyFallbackService {
       if (!response.ok) {
         const detail = await response.text().catch(() => '');
         if (response.status === 401) this.userToken = null;
-        const explanation = response.status === 403 || response.status === 404
-          ? 'Pastikan playlist dimiliki atau dikolaborasikan oleh akun OAuth dan scope playlist-read-private serta playlist-read-collaborative diberikan.'
-          : 'Periksa refresh token Spotify dan konfigurasi aplikasi.';
+        const explanation = response.status === 403
+          ? 'Akun OAuth bukan pemilik atau kolaborator playlist ini. Dalam Spotify Development Mode, playlist publik atau playlist yang hanya diikuti tetap tidak dapat dibaca. Salin isi playlist ke playlist milik akun OAuth, atau minta pemilik menjadikan akun OAuth sebagai kolaborator.'
+          : response.status === 404
+            ? 'Playlist tidak ditemukan atau tidak terlihat oleh akun OAuth. Periksa link dan pengaturan privasi playlist.'
+            : 'Periksa refresh token Spotify dan konfigurasi aplikasi.';
         throw new SpotifyAuthorizationError(`Spotify API ${response.status}. ${explanation}${detail ? ` (${detail.slice(0, 180)})` : ''}`);
       }
       const page = await response.json() as {

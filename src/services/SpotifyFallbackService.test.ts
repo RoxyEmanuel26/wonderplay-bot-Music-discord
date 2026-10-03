@@ -123,3 +123,47 @@ test('explains that Spotify playlist fallback requires a user refresh token', as
     else process.env.SPOTIFY_REFRESH_TOKEN = previous;
   }
 });
+
+test('explains Spotify Development Mode ownership restriction on playlist 403', async () => {
+  const originalFetch = globalThis.fetch;
+  const previous = {
+    id: process.env.SPOTIFY_CLIENT_ID,
+    secret: process.env.SPOTIFY_CLIENT_SECRET,
+    refresh: process.env.SPOTIFY_REFRESH_TOKEN,
+  };
+  process.env.SPOTIFY_CLIENT_ID = 'client';
+  process.env.SPOTIFY_CLIENT_SECRET = 'secret';
+  process.env.SPOTIFY_REFRESH_TOKEN = 'refresh';
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes('accounts.spotify.com/api/token')) {
+      return new Response(JSON.stringify({ access_token: 'user-token', expires_in: 3600 }), { status: 200 });
+    }
+    if (url.includes('open.spotify.com/oembed')) {
+      return new Response(JSON.stringify({ title: 'Public Playlist' }), { status: 200 });
+    }
+    if (url.includes('/v1/playlists/playlist-id/items')) {
+      return new Response(JSON.stringify({ error: { status: 403, message: 'Forbidden' } }), { status: 403 });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  try {
+    const service = new SpotifyFallbackService();
+    const reference = parseSpotifyUrl('https://open.spotify.com/playlist/playlist-id')!;
+    await assert.rejects(
+      () => service.resolveCollection({} as AureliaClient, reference),
+      (error: unknown) => error instanceof SpotifyAuthorizationError
+        && error.message.includes('playlist publik')
+        && error.message.includes('kolaborator'),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previous.id === undefined) delete process.env.SPOTIFY_CLIENT_ID;
+    else process.env.SPOTIFY_CLIENT_ID = previous.id;
+    if (previous.secret === undefined) delete process.env.SPOTIFY_CLIENT_SECRET;
+    else process.env.SPOTIFY_CLIENT_SECRET = previous.secret;
+    if (previous.refresh === undefined) delete process.env.SPOTIFY_REFRESH_TOKEN;
+    else process.env.SPOTIFY_REFRESH_TOKEN = previous.refresh;
+  }
+});

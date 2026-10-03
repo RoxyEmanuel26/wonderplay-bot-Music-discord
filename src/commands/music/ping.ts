@@ -16,7 +16,7 @@ const pingCommand: Command = {
     // Status node Lavalink Cluster
     const nodes = client.shoukaku?.nodes ? Array.from(client.shoukaku.nodes.values()) : [];
     const nodeStatus = nodes.map(n => {
-      const isConnected = n.state === 1;
+      const isConnected = client.isLavalinkNodeHealthy(n.name);
       const statusIcon = isConnected ? '🟢 Online' : '🔴 Offline';
       const players = n.stats?.players ?? 0;
       return `• **${n.name}**: ${statusIcon} \`(${players} players)\``;
