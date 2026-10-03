@@ -32,9 +32,10 @@ class FakePlayer extends EventEmitter {
   public stopCalls = 0;
   public playError: unknown = null;
 
-  async playTrack(options: { track: { encoded: string } }) {
+  async playTrack(options: { track: { encoded: string }; position?: number }) {
     this.played.push(options.track.encoded);
     if (this.playError) throw this.playError;
+    if (typeof options.position === 'number') this.position = options.position;
   }
 
   async stopTrack() { this.stopCalls++; }
@@ -101,6 +102,11 @@ function createQueue() {
       const node = this.shoukaku.nodes.get(name);
       return Boolean(node && node.state === 1 && node.sessionId);
     },
+    compareLavalinkNodes(a: { penalties: number }, b: { penalties: number }) {
+      return a.penalties - b.penalties;
+    },
+    recordLavalinkPlaybackFailure() {},
+    recordLavalinkPlaybackSuccess() {},
   };
   const queue = new Queue(
     client as unknown as AureliaClient,
@@ -147,6 +153,54 @@ test('natural finish advances exactly once to the next track', async () => {
   assert.equal(queue.current?.encoded, 'two');
   assert.deepEqual(player.played, ['one', 'two']);
   assert.deepEqual(queue.history.map((track) => track.encoded), ['one']);
+  queue.dispose();
+});
+
+test('playlist advances all tracks and resets the local position for each new song', async () => {
+  const { queue, player } = createQueue();
+  const tracks = Array.from({ length: 80 }, (_, index) => makeTrack(`song-${index}`));
+  await queue.enqueueMany(tracks);
+  for (let index = 0; index < tracks.length - 1; index++) {
+    player.position = 175000;
+    player.emit('end', { reason: 'finished', track: tracks[index] });
+    await settle(queue);
+    assert.equal(queue.current?.encoded, tracks[index + 1].encoded);
+    assert.equal(player.position, 0);
+  }
+  assert.equal(queue.tracks.length, 0);
+  assert.equal(player.played.length, 80);
+  queue.dispose();
+});
+
+test('near-end stall advances once when Lavalink omits the end event', async () => {
+  const { queue, player } = createQueue();
+  const first = { ...makeTrack('one'), info: { ...makeTrack('one').info, length: 76000 } };
+  const second = makeTrack('two');
+  await queue.enqueueMany([first, second]);
+  player.position = 73000;
+  const check = (queue as unknown as { checkPlaybackProgress(now: number): void }).checkPlaybackProgress.bind(queue);
+  check(1000);
+  check(17000);
+  player.emit('end', { reason: 'finished', track: first });
+  await settle(queue);
+  assert.deepEqual(player.played, ['one', 'two']);
+  assert.equal(queue.current?.encoded, 'two');
+  queue.dispose();
+});
+
+test('end watchdog does not advance a track stalled in the middle or while paused', async () => {
+  const { queue, player } = createQueue();
+  await queue.enqueueMany([makeTrack('one'), makeTrack('two')]);
+  const check = (queue as unknown as { checkPlaybackProgress(now: number): void }).checkPlaybackProgress.bind(queue);
+  player.position = 30000;
+  check(1000);
+  check(21000);
+  player.position = 178000;
+  player.paused = true;
+  check(41000);
+  await settle(queue);
+  assert.deepEqual(player.played, ['one']);
+  assert.equal(queue.tracks.length, 1);
   queue.dispose();
 });
 
@@ -319,6 +373,176 @@ test('normal close emitted by player.move does not start a second recovery', asy
   assert.equal(queue.state, 'PLAYING');
   assert.equal((queue as unknown as { recoveryTimer: NodeJS.Timeout | null }).recoveryTimer, null);
   assert.deepEqual(player.played, ['one', 'one-on-node-b']);
+  queue.dispose();
+});
+
+test('playback failure moves to another public node without losing queued tracks', async () => {
+  const { queue, player, client } = createQueue();
+  const current = makeTrack('private-track');
+  const next = makeTrack('next-track');
+  const publicTrack = makeTrack('public-track');
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  client.shoukaku.nodes.set('node-public', { name: 'node-public', state: 1, sessionId: 'session-public', penalties: 1 });
+  client.resolveTrack = async () => ({ result: { data: publicTrack }, node: { name: 'node-public' } });
+
+  await queue.enqueueMany([current, next]);
+  player.emit('end', { reason: 'loadFailed', track: current });
+  await settle(queue);
+
+  assert.equal(player.node.name, 'node-public');
+  assert.equal(queue.current?.encoded, 'public-track');
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['next-track']);
+  assert.deepEqual(player.played, ['private-track', 'public-track']);
+  assert.equal(player.stopCalls, 0);
+  queue.dispose();
+});
+
+test('restoring a legacy private-node session re-encodes its current track on a public node', async () => {
+  const { queue, player, client } = createQueue();
+  const oldTrack = { ...makeTrack('old-private-track'), pluginInfo: { encodedNode: 'Node-1 (Custom/Local)' } };
+  const replacement = { ...makeTrack('public-track'), pluginInfo: { encodedNode: 'node-a' } };
+  const next = makeTrack('next-track');
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  client.resolveTrack = async () => ({ result: { data: replacement }, node: { name: 'node-a' } });
+
+  await queue.restore({
+    guildId: 'guild', voiceChannelId: 'voice', textChannelId: 'text',
+    nodeName: 'Node-1 (Custom/Local)', current: oldTrack, tracks: [next], history: [],
+    loop: 'NONE', volume: 100, paused: false, positionMs: 35000,
+    filters: { preset: 'none' }, status: 'ACTIVE',
+  });
+
+  assert.deepEqual(player.played, ['public-track']);
+  assert.equal(queue.current?.encoded, 'public-track');
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['next-track']);
+  assert.equal(player.position, 35000);
+  queue.dispose();
+});
+
+test('session restore keeps the newly selected preferred node instead of returning to the saved node', async () => {
+  const { queue, player, client } = createQueue();
+  const saved = { ...makeTrack('saved'), pluginInfo: { encodedNode: 'node-b' } };
+  const replacement = { ...makeTrack('preferred'), pluginInfo: { encodedNode: 'node-a' } };
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  client.shoukaku.nodes.set('node-b', { name: 'node-b', state: 1, sessionId: 'session-b', penalties: 10 });
+  client.resolveTrack = async () => ({ result: { data: replacement }, node: { name: 'node-a' } });
+
+  await queue.restore({
+    guildId: 'guild', voiceChannelId: 'voice', textChannelId: 'text',
+    nodeName: 'node-b', current: saved, tracks: [makeTrack('next')], history: [],
+    loop: 'NONE', volume: 100, paused: false, positionMs: 42000,
+    filters: { preset: 'none' }, status: 'ACTIVE',
+  });
+
+  assert.equal(player.node.name, 'node-a');
+  assert.equal(queue.current?.encoded, 'preferred');
+  assert.equal(player.position, 42000);
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['next']);
+  queue.dispose();
+});
+
+test('cross-node next track is prepared while the current song plays', async () => {
+  const { queue, player, client } = createQueue();
+  const first = { ...makeTrack('first'), pluginInfo: { encodedNode: 'node-a' } };
+  const second = { ...makeTrack('second'), pluginInfo: { encodedNode: 'node-b' } };
+  const prepared = { ...makeTrack('second-on-a'), pluginInfo: { encodedNode: 'node-a' } };
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  client.shoukaku.nodes.set('node-b', { name: 'node-b', state: 1, sessionId: 'session-b', penalties: 10 });
+
+  let resolvePreparation: (value: unknown) => void = () => {};
+  let resolveCalls = 0;
+  client.resolveTrack = async () => {
+    resolveCalls++;
+    return new Promise<unknown>((resolve) => { resolvePreparation = resolve; });
+  };
+
+  await queue.enqueueMany([first, second]);
+  assert.equal(resolveCalls, 1);
+  assert.deepEqual(player.played, ['first']);
+
+  resolvePreparation({ result: { data: prepared }, node: { name: 'node-a' } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  player.emit('end', { reason: 'finished', track: first });
+  await settle(queue);
+
+  assert.deepEqual(player.played, ['first', 'second-on-a']);
+  assert.equal(resolveCalls, 1);
+  assert.equal(player.node.name, 'node-a');
+  queue.dispose();
+});
+
+test('next queued track is re-encoded after the original node goes offline', async () => {
+  const { queue, player, client } = createQueue();
+  const first = { ...makeTrack('first'), pluginInfo: { encodedNode: 'node-a' } };
+  const second = { ...makeTrack('second'), pluginInfo: { encodedNode: 'node-a' } };
+  const publicFirst = { ...makeTrack('public-first'), pluginInfo: { encodedNode: 'node-public' } };
+  const publicSecond = { ...makeTrack('public-second'), pluginInfo: { encodedNode: 'node-public' } };
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  client.shoukaku.nodes.set('node-public', { name: 'node-public', state: 1, sessionId: 'session-public', penalties: 1 });
+  client.resolveTrack = async (query: string) => ({
+    result: { data: query.includes('second') ? publicSecond : publicFirst },
+    node: { name: 'node-public' },
+  });
+
+  await queue.enqueueMany([first, second]);
+  player.emit('end', { reason: 'loadFailed', track: first });
+  await settle(queue);
+  client.shoukaku.nodes.get('node-a')!.state = 3;
+  player.emit('end', { reason: 'finished', track: publicFirst });
+  await settle(queue);
+
+  assert.equal(player.node.name, 'node-public');
+  assert.equal(queue.current?.encoded, 'public-second');
+  assert.deepEqual(player.played, ['first', 'public-first', 'public-second']);
+  assert.equal(player.stopCalls, 0);
+  queue.dispose();
+});
+
+test('Spotify playback failure mirrors a matching YouTube track while keeping Spotify artwork', async () => {
+  const { queue, player, client } = createQueue();
+  const spotify = makeTrack('spotify-song', 'spotify', 'My Song');
+  spotify.info.uri = 'https://open.spotify.com/track/spotify-song';
+  spotify.info.artworkUrl = 'https://example.test/spotify-cover.jpg';
+  const youtube = makeTrack('youtube-song', 'youtube', 'My Song');
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  const queries: string[] = [];
+  client.resolveTrack = async (query: string) => {
+    queries.push(query);
+    return query.startsWith('ytmsearch:')
+      ? { result: { data: [youtube] }, node: { name: 'node-a' } }
+      : null;
+  };
+
+  await queue.enqueue(spotify);
+  player.emit('end', { reason: 'loadFailed', track: spotify });
+  await settle(queue);
+
+  assert.equal(queue.current?.encoded, 'youtube-song');
+  assert.equal(queue.current?.info.uri, spotify.info.uri);
+  assert.equal(queue.current?.info.artworkUrl, spotify.info.artworkUrl);
+  assert.equal((queue.current?.pluginInfo as { spotifyMirror?: boolean })?.spotifyMirror, true);
+  assert.ok(queries.some((query) => query.startsWith('ytmsearch:')));
+  assert.equal(player.stopCalls, 0);
+  queue.dispose();
+});
+
+test('node recovery selects the closest search result instead of the first unrelated result', async () => {
+  const { queue, player, client } = createQueue();
+  const original = makeTrack('original', 'youtube', 'My Song');
+  const unrelated = makeTrack('unrelated', 'youtube', 'Completely Different');
+  const matching = makeTrack('matching', 'youtube', 'My Song');
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  client.shoukaku.nodes.set('node-b', { name: 'node-b', state: 1, sessionId: 'session-b', penalties: 1 });
+  client.resolveTrack = async (query: string) => query.startsWith('ytmsearch:')
+    ? { result: { data: [unrelated, matching] }, node: { name: 'node-b' } }
+    : null;
+
+  await queue.enqueue(original);
+  player.emit('end', { reason: 'loadFailed', track: original });
+  await settle(queue);
+
+  assert.equal(queue.current?.encoded, 'matching');
+  assert.equal(player.node.name, 'node-b');
   queue.dispose();
 });
 

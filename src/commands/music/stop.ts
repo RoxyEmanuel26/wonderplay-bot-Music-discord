@@ -8,7 +8,7 @@ const stopCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('stop')
     .setDescription('Menghentikan musik dan membersihkan antrean.'),
-  aliases: ['st'],
+  aliases: ['st', 'end', 'berhenti'],
   execute: async (ctx: Context, client) => {
     await ctx.deferReply({ flags: MessageFlags.Ephemeral });
     if (!(await hasDJPermissions(ctx.interaction || ctx.message as any))) {

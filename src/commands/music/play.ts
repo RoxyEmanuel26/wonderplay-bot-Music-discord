@@ -36,7 +36,7 @@ const playCommand: Command = {
         .setRequired(true)
         .setAutocomplete(true)
     ),
-  aliases: ['p'],
+  aliases: ['p', 'song', 'putar'],
   autocomplete: async (interaction: AutocompleteInteraction, client) => {
     const focusedValue = interaction.options.getFocused();
     if (!focusedValue) return await interaction.respond([]);
@@ -149,11 +149,9 @@ const playCommand: Command = {
           queue = new Queue(client, player, ctx.channel as TextChannel, ctx.guildId!);
           client.queues.set(ctx.guildId!, queue);
 
-          if (!sourceNodeName || !(await queue.bindToNode(sourceNodeName))) {
-            await queue.disconnect();
-            await ctx.followUp({ embeds: [createErrorEmbed('Node audio tidak dapat diselaraskan dengan sumber track. Silakan coba lagi.')] });
-            return;
-          }
+          // The source can disappear between resolve and join. Keep the voice
+          // connection and let Queue re-encode/recover the track on a live node.
+          if (sourceNodeName) await queue.bindToNode(sourceNodeName);
         } catch {
           await ctx.followUp({ embeds: [createErrorEmbed('Gagal bergabung ke saluran suara. Pastikan bot memiliki izin untuk bergabung dan berbicara di saluran tersebut.')] });
           return;

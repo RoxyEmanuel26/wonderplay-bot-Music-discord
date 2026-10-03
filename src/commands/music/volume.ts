@@ -15,7 +15,7 @@ const volumeCommand: Command = {
         .setMinValue(0)
         .setMaxValue(100)
     ),
-  aliases: ['v'],
+  aliases: ['v', 'vol', 'suara'],
   execute: async (ctx: Context, client) => {
     await ctx.deferReply({ flags: MessageFlags.Ephemeral });
     if (!(await hasDJPermissions(ctx.interaction || ctx.message as any))) {

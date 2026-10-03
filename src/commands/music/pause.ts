@@ -8,7 +8,7 @@ const pauseCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('pause')
     .setDescription('Menjeda lagu yang sedang diputar.'),
-  aliases: ['pa'],
+  aliases: ['pa', 'jeda', 'hold'],
   execute: async (ctx: Context, client) => {
     await ctx.deferReply({ flags: MessageFlags.Ephemeral });
     if (!(await hasDJPermissions(ctx.interaction || ctx.message as any))) {

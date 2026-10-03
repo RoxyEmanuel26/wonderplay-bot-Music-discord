@@ -10,6 +10,14 @@ const readyEvent: Event<Events.ClientReady> = {
     logger.info(`Loaded ${client.commands.size} commands in memory.`);
     client.markDiscordReady();
 
+    if (clientReady.user.username !== 'Aerys') {
+      void clientReady.user.setUsername('Aerys').then(() => {
+        logger.info('Nama bot Discord berhasil diubah menjadi Aerys');
+      }).catch((error) => {
+        logger.warn({ error }, 'Discord menolak perubahan username bot ke Aerys; bot tetap berjalan');
+      });
+    }
+
     if (process.env.DEPLOY_ON_READY === 'true') {
       try {
         const rest = new REST().setToken(process.env.DISCORD_TOKEN!);

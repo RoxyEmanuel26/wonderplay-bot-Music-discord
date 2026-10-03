@@ -8,7 +8,7 @@ const skipCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('skip')
     .setDescription('Melewati lagu yang sedang diputar.'),
-  aliases: ['s'],
+  aliases: ['s', 'next', 'lewati'],
   execute: async (ctx: Context, client) => {
     await ctx.deferReply({ flags: MessageFlags.Ephemeral });
     if (!(await hasDJPermissions(ctx.interaction || ctx.message as any))) {

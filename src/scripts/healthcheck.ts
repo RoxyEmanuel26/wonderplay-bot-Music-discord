@@ -1,6 +1,9 @@
 import 'dotenv/config';
 import { db } from '../database/db';
 import { redis } from '../database/redis';
+import { PUBLIC_LAVALINK_NODES } from '../config/lavalinkNodes';
+import type { NodeOption } from 'shoukaku';
+import WebSocket from 'ws';
 
 type CheckResult = {
   name: string;
@@ -20,33 +23,57 @@ async function check(name: string, operation: () => Promise<string>, required = 
       name,
       ok: false,
       required,
-      detail: detail.replaceAll(process.env.LAVALINK_PASSWORD || '\0', '[redacted]'),
+      detail,
     });
   }
 }
 
-function lavalinkBaseUrl() {
-  const raw = process.env.LAVALINK_URL?.trim()
-    || (process.env.LAVALINK_HOST ? `${process.env.LAVALINK_HOST}:${process.env.LAVALINK_PORT || '2333'}` : '');
-  if (!raw) throw new Error('LAVALINK_URL/LAVALINK_HOST belum dikonfigurasi');
-  if (/^https?:\/\//i.test(raw)) return raw.replace(/\/$/, '');
-  if (/^wss?:\/\//i.test(raw)) return raw.replace(/^ws/i, 'http').replace(/\/$/, '');
-  const secure = process.env.LAVALINK_SECURE === 'true' || process.env.LAVALINK_PORT === '443';
-  return `${secure ? 'https' : 'http'}://${raw.replace(/\/$/, '')}`;
-}
-
-async function lavalinkRequest(path: string) {
-  const response = await fetch(`${lavalinkBaseUrl()}${path}`, {
-    headers: { Authorization: process.env.LAVALINK_PASSWORD?.trim() || 'youshallnotpass' },
+async function lavalinkRequest(node: NodeOption, path: string) {
+  const response = await fetch(`${node.secure ? 'https' : 'http'}://${node.url}${path}`, {
+    headers: { Authorization: node.auth },
     signal: AbortSignal.timeout(10000),
   });
   if (!response.ok) {
     const hint = response.status === 401 || response.status === 403
-      ? ' (otorisasi ditolak; samakan LAVALINK_PASSWORD bot dengan lavalink.server.password/LAVALINK_SERVER_PASSWORD)'
+      ? ' (otorisasi node publik ditolak; perbarui kredensial node publik)'
       : '';
     throw new Error(`HTTP ${response.status} ${response.statusText}${hint}`);
   }
   return response;
+}
+
+async function lavalinkHandshake(node: NodeOption): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const socket = new WebSocket(`${node.secure ? 'wss' : 'ws'}://${node.url}/v4/websocket`, {
+      headers: {
+        Authorization: node.auth,
+        'User-Id': process.env.CLIENT_ID?.trim() || '123456789012345678',
+        'Client-Name': 'WonderplayHealthcheck/1.0',
+      },
+      handshakeTimeout: 6500,
+    });
+    let settled = false;
+    const timeout = setTimeout(() => finish(new Error('WebSocket ready timeout')), 7000);
+    function finish(error?: Error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.terminate();
+      if (error) reject(error);
+      else resolve();
+    }
+    socket.on('message', (message) => {
+      try {
+        if ((JSON.parse(message.toString()) as { op?: string }).op === 'ready') finish();
+      } catch { /* Ignore non-JSON frames until ready or timeout. */ }
+    });
+    socket.on('unexpected-response', (_request, response) => {
+      response.resume();
+      finish(new Error(`WebSocket HTTP ${response.statusCode}`));
+    });
+    socket.on('error', (error) => finish(error));
+    socket.on('close', (code) => finish(new Error(`WebSocket closed ${code} before ready`)));
+  });
 }
 
 function summarizeLoadResult(payload: unknown) {
@@ -88,14 +115,22 @@ async function main() {
     return `token valid untuk ${user.username || 'bot'}`;
   });
 
-  await check('Lavalink version', async () => (await lavalinkRequest('/version')).text());
-  await check('Lavalink info', async () => {
-    const info = await (await lavalinkRequest('/v4/info')).json() as {
-      version?: { semver?: string };
-      plugins?: Array<{ name: string; version: string }>;
-      sourceManagers?: string[];
-    };
-    return `v${info.version?.semver || '?'}, plugins=${info.plugins?.map((plugin) => plugin.name).join(',') || '-'}, sources=${info.sourceManagers?.join(',') || '-'}`;
+  let activeNode: NodeOption | undefined;
+  for (const node of PUBLIC_LAVALINK_NODES) {
+    await check(`Lavalink publik ${node.name}`, async () => {
+      const info = await (await lavalinkRequest(node, '/v4/info')).json() as {
+        version?: { semver?: string };
+        plugins?: Array<{ name: string }>;
+        sourceManagers?: string[];
+      };
+      await lavalinkHandshake(node);
+      activeNode ??= node;
+      return `WebSocket ready, v${info.version?.semver || '?'}, plugins=${info.plugins?.map((plugin) => plugin.name).join(',') || '-'}, sources=${info.sourceManagers?.join(',') || '-'}`;
+    }, false);
+  }
+  await check('Lavalink publik tersedia', async () => {
+    if (!activeNode) throw new Error('Semua node publik tidak tersedia');
+    return activeNode.name;
   });
 
   const identifiers = [
@@ -106,8 +141,10 @@ async function main() {
     ['Spotify track', 'https://open.spotify.com/track/11dFghVXANMlKmJXsNCbNl'],
   ] as const;
   for (const [name, identifier] of identifiers) {
+    if (!activeNode) break;
+    const node = activeNode;
     await check(name, async () => {
-      const response = await lavalinkRequest(`/v4/loadtracks?identifier=${encodeURIComponent(identifier)}`);
+      const response = await lavalinkRequest(node, `/v4/loadtracks?identifier=${encodeURIComponent(identifier)}`);
       return summarizeLoadResult(await response.json());
     });
   }
@@ -115,15 +152,18 @@ async function main() {
   // /v4/loadtracks may return valid metadata even when every YouTube client
   // later fails to obtain an audio URL. The plugin stream route exercises the
   // actual format/client selection without joining a Discord voice channel.
-  await check('YouTube audio stream', async () => {
-    const response = await lavalinkRequest('/youtube/stream/EupWletn-Vo');
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('respons stream tidak memiliki body audio');
-    const first = await reader.read();
-    await reader.cancel();
-    if (first.done || !first.value?.byteLength) throw new Error('stream audio kosong');
-    return `${response.headers.get('content-type') || 'audio'}, chunk=${first.value.byteLength} byte`;
-  }, false);
+  if (activeNode) {
+    const node = activeNode;
+    await check('YouTube audio stream', async () => {
+      const response = await lavalinkRequest(node, '/youtube/stream/EupWletn-Vo');
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('respons stream tidak memiliki body audio');
+      const first = await reader.read();
+      await reader.cancel();
+      if (first.done || !first.value?.byteLength) throw new Error('stream audio kosong');
+      return `${response.headers.get('content-type') || 'audio'}, chunk=${first.value.byteLength} byte`;
+    }, false);
+  }
 
   await check('Spotify oEmbed', async () => {
     const url = new URL('https://open.spotify.com/oembed');

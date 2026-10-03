@@ -3,9 +3,11 @@ import { Command } from './Command';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../utils/logger';
-import { Shoukaku, Connectors, type NodeOption } from 'shoukaku';
+import { Shoukaku, Connectors, type NodeOption, type Track } from 'shoukaku';
 import { Queue } from './Queue';
 import { playbackSessionService } from '../services/PlaybackSessionService';
+import { LavalinkNodeRanker, lavalinkSource } from './LavalinkNodeRanker';
+import { PUBLIC_LAVALINK_NODES } from '../config/lavalinkNodes';
 
 export class AureliaClient extends Client {
   public commands: Collection<string, Command> = new Collection();
@@ -17,6 +19,7 @@ export class AureliaClient extends Client {
   private readonly nodeReconnectTimers = new Map<string, NodeJS.Timeout>();
   private readonly lavalinkNodeConfigs = new Map<string, NodeOption>();
   private readonly nodeReconnectCycles = new Map<string, number>();
+  private readonly nodeRanker = new LavalinkNodeRanker();
 
   constructor() {
     super({
@@ -37,72 +40,22 @@ export class AureliaClient extends Client {
   }
 
   private initShoukaku() {
-    const customHost = process.env.LAVALINK_HOST;
-    const customPort = process.env.LAVALINK_PORT || '2333';
-    const rawCustomUrl = process.env.LAVALINK_URL?.trim() || (customHost ? `${customHost.trim()}:${customPort}` : null);
-    const customSecure = process.env.LAVALINK_SECURE?.trim().toLowerCase() === 'true'
-      || Boolean(rawCustomUrl && /^(?:https|wss):\/\//i.test(rawCustomUrl))
-      || Boolean(rawCustomUrl && /:443\/?$/i.test(rawCustomUrl));
-    const customUrl = rawCustomUrl
-      ?.replace(/^(?:https?|wss?):\/\//i, '')
-      .replace(/\/+$/, '');
-    const customAuth = process.env.LAVALINK_PASSWORD?.trim() || 'youshallnotpass';
     const reconnectTries = readIntegerEnv('LAVALINK_RECONNECT_TRIES', 12, 1, 1000);
     const reconnectIntervalSeconds = readIntegerEnv('LAVALINK_RECONNECT_INTERVAL_SECONDS', 5, 1, 300);
-    const customNodeName = 'Node-1 (Custom/Local)';
-    // Private-only is the safe default and also protects deployments where a
-    // hosting panel still injects an old LAVALINK_USE_PUBLIC_NODES=true value.
-    const privateOnly = process.env.LAVALINK_PRIVATE_ONLY?.trim().toLowerCase() !== 'false';
-    const publicNodesRequested = process.env.LAVALINK_USE_PUBLIC_NODES?.trim().toLowerCase() === 'true';
-    const usePublicNodes = !privateOnly && publicNodesRequested;
-
-    // Multi-Node Cluster Configuration (Auto Load Balancing & Failover)
-    const nodes = [];
-
-    // Prioritaskan node milik sendiri. Node publik hanya berfungsi sebagai cadangan.
-    if (customUrl && !customUrl.includes('jirayu.net')) {
-      nodes.push({
-        name: customNodeName,
-        url: customUrl,
-        auth: customAuth,
-        secure: customSecure,
-      });
-    }
-
-    if (usePublicNodes) {
-      nodes.push(
-        {
-          name: 'Node-2 (MilloHost-ID)',
-          url: 'lava-v4.millohost.my.id:443',
-          auth: 'https://discord.gg/mjS5J2K3ep',
-          secure: true,
-        },
-        {
-          name: 'Node-3 (Serenetia-Global)',
-          url: 'lavalinkv4.serenetia.com:443',
-          auth: 'https://seretia.link/discord',
-          secure: true,
-        },
-      );
-    }
-
-    if (nodes.length === 0) {
-      throw new Error('Tidak ada Lavalink node yang dikonfigurasi. Isi LAVALINK_URL untuk menggunakan Lavalink pribadi.');
-    }
+    const restTimeoutSeconds = readIntegerEnv('LAVALINK_REST_TIMEOUT_SECONDS', 12, 3, 60);
+    // Ignore legacy LAVALINK_URL/PASSWORD/PRIVATE_ONLY values injected by old
+    // hosting panels. This bot intentionally never registers a private node.
+    const nodes = PUBLIC_LAVALINK_NODES.map((node) => ({ ...node }));
 
     for (const node of nodes) this.lavalinkNodeConfigs.set(node.name, { ...node });
 
     logger.info({
-      customNodeConfigured: Boolean(customUrl),
-      privateOnly,
-      publicFallbackEnabled: usePublicNodes,
-      authenticationConfigured: customAuth.length > 0,
+      mode: 'public-only',
       reconnectTries,
       reconnectIntervalSeconds,
+      restTimeoutSeconds,
       configuredNodes: nodes.map((node) => node.name),
-    }, usePublicNodes
-      ? 'Lavalink pribadi diprioritaskan dengan fallback node publik'
-      : 'Mode Lavalink pribadi saja aktif');
+    }, 'Mode Lavalink publik saja aktif');
 
     this.shoukaku = new Shoukaku(new Connectors.DiscordJS(this), nodes, {
       moveOnDisconnect: false,
@@ -112,7 +65,8 @@ export class AureliaClient extends Client {
       reconnectTries,
       // Shoukaku expects seconds here, not milliseconds.
       reconnectInterval: reconnectIntervalSeconds,
-      restTimeout: 10000,
+      // Shoukaku multiplies this value by 1000 internally: it is seconds.
+      restTimeout: restTimeoutSeconds,
       nodeResolver: (availableNodes) => {
         const connected = Array.from(availableNodes.values())
           .filter((node) => (
@@ -120,8 +74,7 @@ export class AureliaClient extends Client {
             && Boolean(node.sessionId)
             && !this.unhealthyLavalinkNodes.has(node.name)
           ));
-        return connected.find((node) => node.name === customNodeName)
-          || connected.sort((a, b) => a.penalties - b.penalties)[0];
+        return connected.sort((a, b) => this.compareLavalinkNodes(a, b))[0];
       },
     });
 
@@ -145,18 +98,13 @@ export class AureliaClient extends Client {
       for (const queue of this.queues.values()) queue.handleNodeReady(name);
       void this.tryRestorePlaybackSessions();
 
-      if (name === customNodeName && !plugins.some((plugin) => plugin.startsWith('lavasrc-plugin:'))) {
-        logger.warn(
-          { node: name, plugins },
-          'Node Lavalink custom tidak memuat LavaSrc; URL Spotify tidak dapat di-resolve pada node ini',
-        );
-      }
     });
     this.shoukaku.on('error', (name, error) => {
       this.unhealthyLavalinkNodes.add(name);
+      this.nodeRanker.failure(name, '*');
       const authenticationRejected = /(?:401|403|unauthori[sz]ed|authentication)/i.test(error.message);
       logger.warn({ node: name, error: error.message, authenticationRejected }, authenticationRejected
-        ? 'Autentikasi Lavalink ditolak; samakan LAVALINK_PASSWORD bot dengan LAVALINK_SERVER_PASSWORD pada server Lavalink'
+        ? 'Autentikasi node Lavalink publik ditolak; konfigurasi akses operator mungkin berubah'
         : 'Lavalink node ditandai unhealthy');
       for (const queue of this.queues.values()) queue.handleNodeUnavailable(name);
       this.scheduleNodeReconnect(name);
@@ -166,12 +114,14 @@ export class AureliaClient extends Client {
     });
     this.shoukaku.on('close', (name, code, reason) => {
       this.unhealthyLavalinkNodes.add(name);
+      this.nodeRanker.failure(name, '*');
       logger.warn(`Lavalink Cluster: Node [${name}] terputus (Code: ${code}, Reason: ${reason || 'None'}). Pemulihan otomatis dimulai.`);
       for (const queue of this.queues.values()) queue.handleNodeUnavailable(name);
       this.scheduleNodeReconnect(name);
     });
     this.shoukaku.on('disconnect', (name, movedPlayers) => {
       this.unhealthyLavalinkNodes.add(name);
+      this.nodeRanker.failure(name, '*');
       logger.warn({ node: name, movedPlayers }, 'Siklus rekoneksi Lavalink habis; retry jangka panjang dijadwalkan');
       for (const queue of this.queues.values()) queue.handleNodeUnavailable(name);
       this.scheduleNodeReconnect(name);
@@ -257,6 +207,34 @@ export class AureliaClient extends Client {
     );
   }
 
+  public compareLavalinkNodes(
+    a: { name: string; penalties: number },
+    b: { name: string; penalties: number },
+    source = '*',
+    preferredNodeName?: string,
+  ): number {
+    const score = (node: { name: string; penalties: number }) => {
+      const config = this.lavalinkNodeConfigs.get(node.name);
+      const sources = this.shoukaku?.nodes.get(node.name)?.info?.sourceManagers;
+      return this.nodeRanker.score({
+        name: node.name,
+        penalties: node.penalties,
+        secure: config?.secure,
+        sources,
+        preference: Math.max(0, Array.from(this.lavalinkNodeConfigs.keys()).indexOf(node.name)) * 20,
+      }, source) - (node.name === preferredNodeName ? 8 : 0);
+    };
+    return score(a) - score(b) || a.name.localeCompare(b.name);
+  }
+
+  public recordLavalinkPlaybackFailure(name: string, source: string): void {
+    this.nodeRanker.failure(name, source);
+  }
+
+  public recordLavalinkPlaybackSuccess(name: string, source: string): void {
+    this.nodeRanker.success(name, source);
+  }
+
   public hasReadyLavalinkNode(): boolean {
     return Array.from(this.shoukaku.nodes.values())
       .some((node) => this.isLavalinkNodeHealthy(node.name));
@@ -278,28 +256,35 @@ export class AureliaClient extends Client {
   public async resolveTrack(query: string, preferredNodeName?: string, allowFallback = true) {
     if (!this.shoukaku?.nodes) return null;
 
-    const idealNode = this.shoukaku.getIdealNode();
+    const source = lavalinkSource(query);
     let connectedNodes = Array.from(this.shoukaku.nodes.values())
       .filter((node) => this.isLavalinkNodeHealthy(node.name))
-      .sort((a, b) => {
-        if (a.name === preferredNodeName) return -1;
-        if (b.name === preferredNodeName) return 1;
-        if (a.name === idealNode?.name) return -1;
-        if (b.name === idealNode?.name) return 1;
-        return a.penalties - b.penalties;
-      });
+      .sort((a, b) => this.compareLavalinkNodes(a, b, source, preferredNodeName));
 
     if (preferredNodeName && !allowFallback) {
       connectedNodes = connectedNodes.filter((node) => node.name === preferredNodeName);
     }
 
     for (const node of connectedNodes) {
+      const startedAt = Date.now();
       try {
         const res = await node.rest.resolve(query);
+        this.nodeRanker.resolveLatency(node.name, Date.now() - startedAt);
         if (res && res.loadType !== 'empty' && res.loadType !== 'error') {
-          return { result: res, node };
+          const tag = (track: Track): Track => ({
+            ...track,
+            pluginInfo: {
+              ...(track.pluginInfo && typeof track.pluginInfo === 'object' ? track.pluginInfo : {}),
+              encodedNode: node.name,
+            },
+          });
+          if (res.loadType === 'track') return { result: { ...res, data: tag(res.data) }, node };
+          if (res.loadType === 'search') return { result: { ...res, data: res.data.map(tag) }, node };
+          return { result: { ...res, data: { ...res.data, tracks: res.data.tracks.map(tag) } }, node };
         }
+        if (res?.loadType === 'error') this.nodeRanker.failure(node.name, source);
       } catch (error) {
+        this.nodeRanker.failure(node.name, source);
         logger.warn({ error, node: node.name, query }, 'Resolve gagal; mencoba node Lavalink berikutnya');
       }
     }

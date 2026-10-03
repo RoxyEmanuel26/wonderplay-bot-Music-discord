@@ -17,6 +17,7 @@ import { logger } from '../utils/logger';
 import { createBaseEmbed, createErrorEmbed } from '../utils/embeds';
 import { formatDuration, createProgressBar } from '../utils/progressbar';
 import { playbackSessionService } from '../services/PlaybackSessionService';
+import { lavalinkSource } from './LavalinkNodeRanker';
 import {
   lyricsService,
   LyricsRateLimitError,
@@ -72,6 +73,15 @@ export class Queue {
   private expectedMigrationCloseUntil = 0;
   private alternativeRecoveryAttempted = false;
   private retryablePlaybackFailure: string | null = null;
+  private lastMarkedFailureGeneration = -1;
+  private playbackSuccessTimer: NodeJS.Timeout | null = null;
+  private preparedNext: { encoded: string; nodeName: string; promise: Promise<Track | null> } | null = null;
+  private lastNaturalEndAt = 0;
+  private playbackRequestAt = 0;
+  private observedProgressGeneration = -1;
+  private lastObservedPositionMs = 0;
+  private lastPlaybackProgressAt = Date.now();
+  private endWatchdogGeneration = -1;
   private readonly lyricsCooldowns = new Map<string, number>();
 
   constructor(client: AureliaClient, player: Player, textChannel: SendableChannels, guildId: string) {
@@ -80,7 +90,38 @@ export class Queue {
     this.textChannel = textChannel;
     this.guildId = guildId;
     const checkpointMs = Math.max(1000, Number(process.env.PLAYBACK_CHECKPOINT_INTERVAL_MS) || 5000);
-    this.checkpointTimer = setInterval(() => playbackSessionService.schedule(this), checkpointMs);
+    this.checkpointTimer = setInterval(() => {
+      playbackSessionService.schedule(this);
+      this.checkPlaybackProgress();
+    }, checkpointMs);
+
+    this.player.on('start', (event) => {
+      if (!this.current || event.track.encoded !== this.current.encoded) return;
+      const now = Date.now();
+      logger.info({
+        guildId: this.guildId,
+        title: this.current.info.title,
+        node: this.player.node.name,
+        sinceEndMs: this.lastNaturalEndAt ? now - this.lastNaturalEndAt : null,
+        sinceRequestMs: this.playbackRequestAt ? now - this.playbackRequestAt : null,
+      }, 'Lavalink mulai mengirim audio track');
+      this.lastNaturalEndAt = 0;
+      this.playbackRequestAt = 0;
+      if (this.playbackSuccessTimer) clearTimeout(this.playbackSuccessTimer);
+      const generation = this.playbackGeneration;
+      const nodeName = this.player.node.name;
+      const source = this.currentSource();
+      // A Lavalink start event alone does not prove that an audio stream stayed
+      // playable; immediate YouTube extraction failures often follow it.
+      this.playbackSuccessTimer = setTimeout(() => {
+        this.playbackSuccessTimer = null;
+        if (!this.disposed && this.current?.encoded === event.track.encoded
+          && this.playbackGeneration === generation && this.player.node.name === nodeName
+          && this.state === 'PLAYING') {
+          this.client.recordLavalinkPlaybackSuccess(nodeName, source);
+        }
+      }, 5000);
+    });
 
     this.player.on('end', (event) => {
       const generationAtEvent = this.playbackGeneration;
@@ -95,12 +136,14 @@ export class Queue {
       if (event.reason === 'replaced' || event.reason === 'stopped') {
         return;
       }
+      const endedAt = Date.now();
       this.runDetached(async () => {
         if (!this.isCurrentEvent(event.track.encoded, 'end', generationAtEvent)) return;
         if (event.reason === 'loadFailed') {
           await this.recoverPlayback('loadFailed');
           return;
         }
+        if (event.reason === 'finished') this.lastNaturalEndAt = endedAt;
         await this.advanceCurrent('natural-end');
       });
     });
@@ -166,6 +209,7 @@ export class Queue {
     this.tracks.push(track);
     this.queueRevision++;
     this.changed();
+    this.prepareNextTrack();
     return this.runExclusive(() => this.playNext());
   }
 
@@ -174,6 +218,7 @@ export class Queue {
     this.tracks.push(...tracks);
     this.queueRevision++;
     this.changed();
+    this.prepareNextTrack();
     return this.runExclusive(() => this.playNext());
   }
 
@@ -299,6 +344,9 @@ export class Queue {
     this.checkpointTimer = null;
     if (this.panelTimer) clearTimeout(this.panelTimer);
     this.panelTimer = null;
+    if (this.playbackSuccessTimer) clearTimeout(this.playbackSuccessTimer);
+    this.playbackSuccessTimer = null;
+    this.preparedNext = null;
     void this.deleteControlPanels();
   }
 
@@ -375,13 +423,73 @@ export class Queue {
     }
   }
 
+  /** Resolve only the next cross-node track while the current song is still playing. */
+  private prepareNextTrack(): void {
+    if (this.disposed || !this.current) return;
+    const next = this.tracks[0];
+    if (!next) return;
+    const encodedNode = (next.pluginInfo as Record<string, unknown> | undefined)?.encodedNode;
+    const active = this.client.shoukaku.nodes.get(this.player.node.name);
+    if (typeof encodedNode !== 'string' || encodedNode === this.player.node.name
+      || !active || !this.client.isLavalinkNodeHealthy(active.name)) return;
+
+    const origin = this.client.shoukaku.nodes.get(encodedNode);
+    const source = lavalinkSource(next.info.sourceName);
+    if (origin && this.client.isLavalinkNodeHealthy(origin.name)
+      && this.client.compareLavalinkNodes(origin, active, source) < 0) return;
+    if (this.preparedNext?.encoded === next.encoded && this.preparedNext.nodeName === active.name) return;
+
+    const promise = this.resolveTrackForNode(next, active.name).catch((error) => {
+      logger.debug({ error, guildId: this.guildId, node: active.name }, 'Next-track preparation failed');
+      return null;
+    });
+    this.preparedNext = { encoded: next.encoded, nodeName: active.name, promise };
+  }
+
   private async startTrack(track: Track, reason: string) {
+    const transitionStartedAt = Date.now();
+    if (this.playbackSuccessTimer) clearTimeout(this.playbackSuccessTimer);
+    this.playbackSuccessTimer = null;
+    let encodingUnavailable = false;
+    const encodedNode = (track.pluginInfo as Record<string, unknown> | undefined)?.encodedNode;
+    if (typeof encodedNode === 'string' && encodedNode !== this.player.node.name) {
+      const active = this.client.shoukaku.nodes.get(this.player.node.name);
+      const origin = this.client.shoukaku.nodes.get(encodedNode);
+      const source = lavalinkSource(track.info.sourceName);
+      const preferOrigin = Boolean(origin && this.client.isLavalinkNodeHealthy(encodedNode)
+        && (!active || !this.client.isLavalinkNodeHealthy(active.name)
+          || this.client.compareLavalinkNodes(origin, active, source) < 0));
+      if (preferOrigin && await this.movePlayer(encodedNode, `encoded-track:${reason}`)) {
+        logger.info({ guildId: this.guildId, node: encodedNode }, 'Playing queued track on its encoding node');
+      } else if (active && this.client.isLavalinkNodeHealthy(active.name)) {
+        const prepared = this.preparedNext;
+        const compatible = prepared?.encoded === track.encoded && prepared.nodeName === active.name
+          ? await prepared.promise
+          : await this.resolveTrackForNode(track, active.name);
+        if (compatible) {
+          track = compatible;
+        } else if (origin && this.client.isLavalinkNodeHealthy(encodedNode)) {
+          encodingUnavailable = !(await this.movePlayer(encodedNode, `encoded-track-fallback:${reason}`));
+        } else {
+          encodingUnavailable = true;
+        }
+      } else {
+        encodingUnavailable = true;
+      }
+    }
+    this.preparedNext = null;
     const previousTitle = this.current?.info.title || null;
     this.current = track;
     this.playbackGeneration++;
+    this.resetPlaybackProgress();
     this.attemptedNodes = new Set([this.player.node.name]);
     this.alternativeRecoveryAttempted = false;
     this.retryablePlaybackFailure = null;
+
+    if (encodingUnavailable) {
+      this.beginRecovery('encoded-node-unavailable');
+      return;
+    }
 
     if (!this.hasUsablePlayerSession()) {
       logger.warn({
@@ -395,7 +503,11 @@ export class Queue {
     }
 
     try {
-      await this.player.playTrack({ track: { encoded: track.encoded } });
+      // Shoukaku does not reset its local position when only track is supplied.
+      // The old position can make the next song appear stuck near its end.
+      const playRequestAt = Date.now();
+      this.playbackRequestAt = playRequestAt;
+      await this.player.playTrack({ track: { encoded: track.encoded }, position: 0 });
       this.state = this.player.paused ? 'PAUSED' : 'PLAYING';
       this.recoveryReason = null;
       this.recoveryAttempt = 0;
@@ -407,7 +519,10 @@ export class Queue {
         title: track.info.title,
         remaining: this.tracks.length,
         node: this.player.node.name,
+        prepareMs: playRequestAt - transitionStartedAt,
+        playRequestMs: Date.now() - playRequestAt,
       }, 'Playback transition completed');
+      this.prepareNextTrack();
       this.scheduleControlPanelRefresh();
       this.changed();
     } catch (error) {
@@ -471,8 +586,58 @@ export class Queue {
     return matches;
   }
 
+  private resetPlaybackProgress(now = Date.now()) {
+    this.observedProgressGeneration = this.playbackGeneration;
+    this.lastObservedPositionMs = 0;
+    this.lastPlaybackProgressAt = now;
+    this.endWatchdogGeneration = -1;
+  }
+
+  private checkPlaybackProgress(now = Date.now()) {
+    const track = this.current;
+    if (this.disposed || !track || this.state !== 'PLAYING' || this.player.paused
+      || track.info.isStream || !track.info.isSeekable || track.info.length < 10_000) {
+      this.lastPlaybackProgressAt = now;
+      return;
+    }
+
+    if (this.observedProgressGeneration !== this.playbackGeneration) this.resetPlaybackProgress(now);
+    const position = Math.max(0, this.player.position || 0);
+    if (position > this.lastObservedPositionMs + 250) {
+      this.lastObservedPositionMs = position;
+      this.lastPlaybackProgressAt = now;
+      return;
+    }
+    // Lavalink occasionally stops reporting updates near the end without a
+    // TrackEndEvent. Advance only after a sustained near-end stall, not after
+    // ordinary buffering in the middle of a track.
+    if (position <= 0 || track.info.length - position > 5000
+      || now - this.lastPlaybackProgressAt < 15_000
+      || this.endWatchdogGeneration === this.playbackGeneration) return;
+
+    const generation = this.playbackGeneration;
+    this.endWatchdogGeneration = generation;
+    logger.warn({ guildId: this.guildId, generation, position, duration: track.info.length,
+      node: this.player.node.name, remaining: this.tracks.length },
+    'Lavalink end event missing after near-end stall; advancing queue');
+    this.runDetached(async () => {
+      if (!this.isCurrentEvent(track.encoded, 'end-watchdog', generation)) return;
+      await this.advanceCurrent('end-watchdog');
+    });
+  }
+
   private async recoverPlayback(cause: string) {
     if (this.disposed || !this.current) return;
+
+    if (/^(?:loadFailed|exception|stuck|node-unavailable:)/.test(cause)
+      && this.lastMarkedFailureGeneration !== this.playbackGeneration) {
+      const encodedNode = (this.current.pluginInfo as Record<string, unknown> | undefined)?.encodedNode;
+      const failedNode = typeof encodedNode === 'string' ? encodedNode : this.player.node.name;
+      this.client.recordLavalinkPlaybackFailure(failedNode, this.currentSource());
+      this.lastMarkedFailureGeneration = this.playbackGeneration;
+    }
+    if (this.playbackSuccessTimer) clearTimeout(this.playbackSuccessTimer);
+    this.playbackSuccessTimer = null;
 
     // A reconnect watchdog can replace the Node instance while the Queue still
     // owns the previous Player reference. Synchronize it before comparing node
@@ -488,7 +653,7 @@ export class Queue {
 
     const candidates = connectedNodes
       .filter((node) => !this.attemptedNodes.has(node.name))
-      .sort((a, b) => a.penalties - b.penalties);
+      .sort((a, b) => this.client.compareLavalinkNodes(a, b, this.currentSource()));
 
     for (const node of candidates) {
       this.attemptedNodes.add(node.name);
@@ -523,6 +688,7 @@ export class Queue {
           this.retryablePlaybackFailure = null;
           this.recoveryAttempt = 0;
           this.scheduleControlPanelRefresh();
+          this.prepareNextTrack();
           logger.info({
             guildId: this.guildId,
             node: node.name,
@@ -535,6 +701,7 @@ export class Queue {
           return;
         }
       } catch (error) {
+        this.client.recordLavalinkPlaybackFailure(node.name, this.currentSource());
         logger.warn({ error, guildId: this.guildId, node: node.name }, 'Fallback Lavalink node failed');
         if (this.isSessionUnavailableError(error)) {
           this.beginRecovery(`session-unavailable:${node.name}`);
@@ -543,16 +710,14 @@ export class Queue {
       }
     }
 
-    // YouTube can still return valid metadata/encoded tracks while every
-    // client fails later when requesting the actual audio stream. Prefer a
-    // matching SoundCloud mirror before another YouTube upload: when YouTube
-    // blocks the Lavalink host, every video ID usually fails in the same way.
-    // This keeps a source-wide YouTube outage from stopping the entire queue.
-    if (!this.alternativeRecoveryAttempted && this.isYouTubeTrack(this.current)) {
+    // Metadata can resolve even when the stream fails. Search another audio
+    // source before skipping: YouTube -> SoundCloud and Spotify -> YouTube.
+    if (!this.alternativeRecoveryAttempted
+      && (this.isYouTubeTrack(this.current) || this.isSpotifyTrack(this.current))) {
       this.alternativeRecoveryAttempted = true;
       const original = this.current;
       const position = Math.max(0, this.player.position || 0);
-      for (const node of connectedNodes.sort((a, b) => a.penalties - b.penalties)) {
+      for (const node of connectedNodes.sort((a, b) => this.client.compareLavalinkNodes(a, b, this.currentSource()))) {
         try {
           const alternative = await this.resolveAlternativeTrackForNode(original, node.name);
           if (!alternative) continue;
@@ -572,11 +737,20 @@ export class Queue {
             || await this.movePlayer(node.name, `youtube-alternative:${cause}`);
           if (!ready) continue;
 
+          const spotifyOriginal = this.isSpotifyTrack(original);
           const mirrored: Track = {
             ...alternative,
+            info: spotifyOriginal ? {
+              ...alternative.info,
+              uri: original.info.uri,
+              artworkUrl: original.info.artworkUrl || alternative.info.artworkUrl,
+            } : alternative.info,
             pluginInfo: {
               ...(alternative.pluginInfo as Record<string, unknown>),
-              youtubeAlternativeFor: original.info.uri || original.info.identifier,
+              ...(spotifyOriginal
+                ? { spotifyMirror: true, spotifyUrl: original.info.uri }
+                : { youtubeAlternativeFor: original.info.uri || original.info.identifier }),
+              encodedNode: node.name,
               playbackSource: alternative.info.uri,
             },
           };
@@ -590,15 +764,19 @@ export class Queue {
             volume: Math.min(100, this.player.volume),
           });
           this.state = this.player.paused ? 'PAUSED' : 'PLAYING';
-          this.recoveryReason = alternative.info.sourceName === 'soundcloud'
-            ? 'Stream YouTube diblokir; audio dialihkan ke mirror SoundCloud'
-            : 'Video asli diblokir YouTube; audio dialihkan ke upload yang cocok';
+          this.recoveryReason = spotifyOriginal
+            ? `Stream Spotify gagal; audio dialihkan ke ${alternative.info.sourceName}`
+            : alternative.info.sourceName === 'soundcloud'
+              ? 'Stream YouTube diblokir; audio dialihkan ke mirror SoundCloud'
+              : 'Video asli diblokir YouTube; audio dialihkan ke upload yang cocok';
           this.recoveryAttempt = 0;
           this.retryablePlaybackFailure = null;
           this.scheduleControlPanelRefresh();
+          this.prepareNextTrack();
           this.changed();
           return;
         } catch (error) {
+          this.client.recordLavalinkPlaybackFailure(node.name, this.currentSource());
           logger.warn({ error, guildId: this.guildId, node: node.name }, 'Alternate YouTube recovery failed');
           if (this.isSessionUnavailableError(error)) {
             this.beginRecovery(`session-unavailable:${node.name}`);
@@ -674,24 +852,53 @@ export class Queue {
       const data = resolved?.result.data;
       if (!data) continue;
 
-      if (Array.isArray(data)) {
-        return data[0] || null;
-      }
-
       const playlist = data as { tracks?: Track[] };
-      if (playlist.tracks) {
-        return playlist.tracks[0] || null;
+      const candidates = Array.isArray(data) ? data
+        : playlist.tracks ? playlist.tracks : [data as Track];
+      const isSearch = /^(?:ytm?search|scsearch):/i.test(query);
+      const candidate = isSearch
+        ? candidates.map((item) => ({ item, score: this.scoreAlternativeTrack(track, item) }))
+          .sort((a, b) => b.score - a.score)
+          .find(({ score }) => score >= 0.45)?.item
+        : candidates[0];
+      if (!candidate) continue;
+      if (pluginInfo?.spotifyMirror) {
+        return {
+          ...candidate,
+          info: {
+            ...candidate.info,
+            uri: track.info.uri,
+            artworkUrl: track.info.artworkUrl || candidate.info.artworkUrl,
+          },
+          pluginInfo: {
+            ...(candidate.pluginInfo && typeof candidate.pluginInfo === 'object' ? candidate.pluginInfo : {}),
+            ...pluginInfo,
+            encodedNode: nodeName,
+            playbackSource: candidate.info.uri,
+          },
+        };
       }
-
-      return data as Track;
+      return candidate;
     }
 
     return null;
   }
 
+  private currentSource(): string {
+    const pluginInfo = this.current?.pluginInfo as Record<string, unknown> | undefined;
+    const playbackSource = typeof pluginInfo?.playbackSource === 'string' ? pluginInfo.playbackSource : null;
+    return lavalinkSource(playbackSource || this.current?.info.sourceName || this.current?.info.uri);
+  }
+
   private isYouTubeTrack(track: Track): boolean {
     return track.info.sourceName === 'youtube'
       || /(?:youtube\.com|youtu\.be)/i.test(track.info.uri || '');
+  }
+
+  private isSpotifyTrack(track: Track): boolean {
+    const pluginInfo = track.pluginInfo as Record<string, unknown> | undefined;
+    return !pluginInfo?.spotifyMirror && (track.info.sourceName === 'spotify'
+      || /open\.spotify\.com/i.test(track.info.uri || ''));
   }
 
   private isYoutubeSourceUnavailable(message: string): boolean {
@@ -713,7 +920,10 @@ export class Queue {
     ].filter(Boolean))];
     if (searches.length === 0) return null;
 
-    for (const prefix of ['scsearch:', 'ytmsearch:', 'ytsearch:']) {
+    const prefixes = this.isSpotifyTrack(track)
+      ? ['ytmsearch:', 'ytsearch:', 'scsearch:']
+      : ['scsearch:', 'ytmsearch:', 'ytsearch:'];
+    for (const prefix of prefixes) {
       for (const search of searches) {
         const resolved = await this.client.resolveTrack(`${prefix}${search}`, nodeName, false);
         const data = resolved?.result.data;
@@ -784,6 +994,9 @@ export class Queue {
     this.state = 'IDLE';
     this.recoveryReason = null;
     this.retryablePlaybackFailure = null;
+    this.preparedNext = null;
+    this.lastNaturalEndAt = 0;
+    this.playbackRequestAt = 0;
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = null;
 
@@ -885,8 +1098,17 @@ export class Queue {
     }
 
     this.state = snapshot.status === 'RECOVERING' ? 'RECOVERING' : snapshot.paused ? 'PAUSED' : 'PLAYING';
-    if (snapshot.nodeName && this.player.node.name !== snapshot.nodeName) {
-      await this.movePlayer(snapshot.nodeName, 'session-restore').catch(() => false);
+    const encodedNode = (this.current.pluginInfo as Record<string, unknown> | undefined)?.encodedNode;
+    const incompatibleEncoding = (snapshot.nodeName && snapshot.nodeName !== this.player.node.name)
+      || (typeof encodedNode === 'string' && encodedNode !== this.player.node.name);
+    if (incompatibleEncoding) {
+      // Preserve the newly selected healthy node (prefer Node-3) rather than
+      // moving back to a saved, potentially stuttering node. Encoded tracks
+      // from another node must be resolved again before playback.
+      this.player.position = Math.max(0, snapshot.positionMs);
+      this.attemptedNodes.clear();
+      await this.recoverPlayback('session-restore:node-changed');
+      return;
     }
     if (!this.hasUsablePlayerSession()) {
       this.beginRecovery('session-restore:session-unavailable');
@@ -901,6 +1123,7 @@ export class Queue {
       });
       this.playbackGeneration++;
       this.state = snapshot.paused ? 'PAUSED' : 'PLAYING';
+      this.prepareNextTrack();
       if (this.currentFilter !== 'none') await this.applyFilter(this.currentFilter);
       this.changed();
       this.scheduleControlPanelRefresh(0);

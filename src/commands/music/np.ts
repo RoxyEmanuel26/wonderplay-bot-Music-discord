@@ -8,7 +8,7 @@ const npCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('np')
     .setDescription('Menampilkan lagu yang sedang diputar saat ini beserta durasinya.'),
-  aliases: ['nowplaying'],
+  aliases: ['nowplaying', 'now', 'current'],
   execute: async (ctx: Context, client) => {
     const queue = client.queues.get(ctx.guildId!);
     

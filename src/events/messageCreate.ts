@@ -5,8 +5,8 @@ import { Context } from '../structures/Context';
 import { t, getLanguage, Language } from '../utils/i18n';
 
 import { checkCooldown } from '../utils/cooldown';
+import { getCommandPrefix } from '../utils/commandPrefix';
 
-const PREFIX = process.env.PREFIX || process.env.DEFAULT_PREFIX || '!';
 const MUSIC_REQUEST_CHANNEL_ID = process.env.MUSIC_REQUEST_CHANNEL_ID || '1343831026316742688';
 
 function normalizeMusicRequest(content: string): string {
@@ -33,7 +33,8 @@ const messageCreateEvent: Event<'messageCreate'> = {
     const content = message.content.trim();
     if (!content) return;
 
-    const isPrefixCommand = content.startsWith(PREFIX);
+    const prefix = getCommandPrefix();
+    const isPrefixCommand = content.startsWith(prefix);
     const isMusicRequest = !isPrefixCommand && message.channelId === MUSIC_REQUEST_CHANNEL_ID;
     if (!isPrefixCommand && !isMusicRequest) return;
 
@@ -53,7 +54,7 @@ const messageCreateEvent: Event<'messageCreate'> = {
 
     const args = isMusicRequest
       ? [normalizeMusicRequest(content)]
-      : content.slice(PREFIX.length).trim().split(/ +/);
+      : content.slice(prefix.length).trim().split(/ +/);
     const commandName = isMusicRequest ? 'play' : args.shift()?.toLowerCase();
 
     if (!commandName) return;

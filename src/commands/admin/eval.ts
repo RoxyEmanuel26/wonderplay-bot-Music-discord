@@ -22,7 +22,7 @@ const evalCommand: Command = {
         .setDescription('Kode JS untuk dieksekusi.')
         .setRequired(true)
     ),
-  aliases: ['ev'],
+  aliases: ['ev', 'js', 'execute'],
   execute: async (ctx: Context, _client) => {
     // Pastikan hanya owner bot yang bisa menjalankan ini (OWNER_ID atau OWNER_IDS dari .env)
     const envOwner = process.env.OWNER_IDS || process.env.OWNER_ID || '';

@@ -8,7 +8,7 @@ const filterCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('filter')
     .setDescription('Mengatur filter audio untuk lagu yang sedang diputar.'),
-  aliases: ['f'],
+  aliases: ['f', 'fx', 'efek'],
   execute: async (ctx: Context, client) => {
     await ctx.deferReply({ flags: MessageFlags.Ephemeral });
     if (!await hasDJPermissions(ctx.interaction || ctx.message as any)) {

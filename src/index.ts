@@ -68,7 +68,7 @@ app.get('/api/stats', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('<h1>AURELIA Music Bot is running!</h1><p>Check <a href="/api/stats">/api/stats</a> for live statistics.</p>');
+  res.send('<h1>Aerys Music Bot is running!</h1><p>Check <a href="/api/stats">/api/stats</a> for live statistics.</p>');
 });
 
 app.listen(PORT, () => {

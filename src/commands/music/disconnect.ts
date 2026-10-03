@@ -8,7 +8,7 @@ const disconnectCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('disconnect')
     .setDescription('Mengeluarkan bot dari voice channel dan menghapus sesi playback.'),
-  aliases: ['dc', 'leave'],
+  aliases: ['dc', 'leave', 'keluar'],
   execute: async (ctx: Context, client) => {
     await ctx.deferReply({ flags: MessageFlags.Ephemeral });
     if (!(await hasDJPermissions(ctx.interaction || ctx.message as never))) {

@@ -5,6 +5,7 @@ import { createErrorEmbed, createSuccessEmbed } from '../../utils/embeds';
 import { Language } from '../../utils/i18n';
 import { db } from '../../database/db';
 import { redis } from '../../database/redis';
+import { getCommandPrefix } from '../../utils/commandPrefix';
 
 const configCommand: Command = {
   data: new SlashCommandBuilder()
@@ -31,8 +32,9 @@ const configCommand: Command = {
             )
         )
     ),
-  aliases: ['cfg', 'setting'],
+  aliases: ['cfg', 'setting', 'settings'],
   execute: async (ctx: Context) => {
+    const prefix = getCommandPrefix();
     // Check Admin Permissions
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const member = ctx.member as any;
@@ -52,8 +54,8 @@ const configCommand: Command = {
         embeds: [
           createErrorEmbed(
             '**Panduan Pengaturan Konfigurasi Server:**\n' +
-            '• `!config djrole <@role/roleId>` - Mengatur role DJ\n' +
-            '• `!config language <id/en>` - Mengubah bahasa bot'
+            `• \`${prefix}config djrole <@role/roleId>\` - Mengatur role DJ\n` +
+            `• \`${prefix}config language <id/en>\` - Mengubah bahasa bot`
           )
         ],
         flags: MessageFlags.Ephemeral,
@@ -69,7 +71,7 @@ const configCommand: Command = {
       } else {
         const roleArg = ctx.args[1];
         if (!roleArg) {
-          await ctx.reply({ embeds: [createErrorEmbed('Mohon tentukan role DJ. Contoh: `!config djrole @DJ`')], flags: MessageFlags.Ephemeral });
+          await ctx.reply({ embeds: [createErrorEmbed(`Mohon tentukan role DJ. Contoh: \`${prefix}config djrole @DJ\``)], flags: MessageFlags.Ephemeral });
           return;
         }
         roleId = roleArg.replace(/<@&|>/g, '');
@@ -104,7 +106,7 @@ const configCommand: Command = {
       }
 
       if (!langStr || !['id', 'en'].includes(langStr)) {
-        await ctx.reply({ embeds: [createErrorEmbed('Pilihan bahasa tidak valid. Pilih antara `id` (Indonesia) atau `en` (English). Contoh: `!config language id`')], flags: MessageFlags.Ephemeral });
+        await ctx.reply({ embeds: [createErrorEmbed(`Pilihan bahasa tidak valid. Pilih antara \`id\` (Indonesia) atau \`en\` (English). Contoh: \`${prefix}config language id\``)], flags: MessageFlags.Ephemeral });
         return;
       }
       

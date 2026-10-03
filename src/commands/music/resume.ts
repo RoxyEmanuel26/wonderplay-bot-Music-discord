@@ -8,7 +8,7 @@ const resumeCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('resume')
     .setDescription('Melanjutkan lagu yang sedang dijeda.'),
-  aliases: ['r', 'res'],
+  aliases: ['r', 'res', 'lanjut', 'unpause'],
   execute: async (ctx: Context, client) => {
     await ctx.deferReply({ flags: MessageFlags.Ephemeral });
     if (!(await hasDJPermissions(ctx.interaction || ctx.message as any))) {
