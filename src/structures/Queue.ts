@@ -82,6 +82,7 @@ export class Queue {
   private lastObservedPositionMs = 0;
   private lastPlaybackProgressAt = Date.now();
   private endWatchdogGeneration = -1;
+  private lastProgressPanelRefreshAt = 0;
   private readonly lyricsCooldowns = new Map<string, number>();
 
   constructor(client: AureliaClient, player: Player, textChannel: SendableChannels, guildId: string) {
@@ -93,11 +94,13 @@ export class Queue {
     this.checkpointTimer = setInterval(() => {
       playbackSessionService.schedule(this);
       this.checkPlaybackProgress();
+      this.refreshProgressPanelIfDue();
     }, checkpointMs);
 
     this.player.on('start', (event) => {
       if (!this.current || event.track.encoded !== this.current.encoded) return;
       const now = Date.now();
+      this.resetPlaybackProgress(now);
       logger.info({
         guildId: this.guildId,
         title: this.current.info.title,
@@ -289,6 +292,7 @@ export class Queue {
       this.requirePlayerSession(paused ? 'menjeda musik' : 'melanjutkan musik');
       await this.player.setPaused(paused);
       this.state = paused ? 'PAUSED' : 'PLAYING';
+      this.resetPlaybackProgress();
       this.changed();
       this.scheduleControlPanelRefresh();
     });
@@ -608,28 +612,33 @@ export class Queue {
       this.lastPlaybackProgressAt = now;
       return;
     }
-    // Lavalink occasionally stops reporting updates near the end without a
-    // TrackEndEvent. Advance only after a sustained near-end stall, not after
-    // ordinary buffering in the middle of a track.
-    if (position <= 0 || track.info.length - position > 5000
-      || now - this.lastPlaybackProgressAt < 15_000
+    const stalledForMs = now - this.lastPlaybackProgressAt;
+    const remainingMs = Math.max(0, track.info.length - position);
+    const nearEnd = position > 0 && remainingMs <= 5000;
+    const shouldAdvance = nearEnd && stalledForMs >= 15_000
+      || position > 0 && stalledForMs >= remainingMs + 10_000;
+    const shouldRecover = position <= 0 && stalledForMs >= 30_000
+      || position > 0 && stalledForMs >= 45_000;
+    if ((!shouldAdvance && !shouldRecover)
       || this.endWatchdogGeneration === this.playbackGeneration) return;
 
     const generation = this.playbackGeneration;
     this.endWatchdogGeneration = generation;
     logger.warn({ guildId: this.guildId, generation, position, duration: track.info.length,
-      node: this.player.node.name, remaining: this.tracks.length },
-    'Lavalink end event missing after near-end stall; advancing queue');
+      stalledForMs, node: this.player.node.name, remaining: this.tracks.length,
+      action: shouldAdvance ? 'advance' : 'recover' },
+    'Lavalink playback stopped progressing without an end or stuck event');
     this.runDetached(async () => {
       if (!this.isCurrentEvent(track.encoded, 'end-watchdog', generation)) return;
-      await this.advanceCurrent('end-watchdog');
+      if (shouldAdvance) await this.advanceCurrent('end-watchdog');
+      else await this.recoverPlayback('watchdog-stall');
     });
   }
 
   private async recoverPlayback(cause: string) {
     if (this.disposed || !this.current) return;
 
-    if (/^(?:loadFailed|exception|stuck|node-unavailable:)/.test(cause)
+    if (/^(?:loadFailed|exception|stuck|watchdog-stall|node-unavailable:)/.test(cause)
       && this.lastMarkedFailureGeneration !== this.playbackGeneration) {
       const encodedNode = (this.current.pluginInfo as Record<string, unknown> | undefined)?.encodedNode;
       const failedNode = typeof encodedNode === 'string' ? encodedNode : this.player.node.name;
@@ -1150,6 +1159,16 @@ export class Queue {
     }, delayMs);
   }
 
+  /** Update the position in place; only user activity and track changes bump the panel. */
+  private refreshProgressPanelIfDue(now = Date.now()) {
+    if (this.disposed || !this.current || this.panelTimer || this.controlMessages.size === 0
+      || now - this.lastProgressPanelRefreshAt < 10_000) return;
+    this.lastProgressPanelRefreshAt = now;
+    this.panelOperation = this.panelOperation
+      .then(() => this.refreshControlPanels(false))
+      .catch((error) => logger.warn({ error, guildId: this.guildId }, 'Control panel progress update failed'));
+  }
+
   public async handleControlInteraction(interaction: ButtonInteraction | StringSelectMenuInteraction) {
     // Discord requires component interactions to be acknowledged within roughly
     // three seconds. Do this before any cache miss, REST member fetch, DB call,
@@ -1232,6 +1251,7 @@ export class Queue {
         await this.runExclusive(async () => {
           this.requirePlayerSession('menggeser posisi lagu');
           await this.player.seekTo(position);
+          this.resetPlaybackProgress();
         });
         this.changed();
         label = `menggeser posisi ke ${formatDuration(position)}`;
@@ -1402,7 +1422,7 @@ export class Queue {
     return [...channels.values()];
   }
 
-  private async refreshControlPanels() {
+  private async refreshControlPanels(bump = true) {
     if (this.disposed) return;
     const components = this.buildControlComponents();
     const position = this.current ? Math.max(0, Math.min(this.player.position || 0, this.current.info.length)) : 0;
@@ -1424,11 +1444,13 @@ export class Queue {
     const progress = this.current
       ? `\`${formatDuration(position)}\` ${createProgressBar(position, this.current.info.length, 15)} \`${formatDuration(this.current.info.length)}\``
       : '';
+    const progressStale = this.current && this.state === 'PLAYING'
+      && Date.now() - this.lastPlaybackProgressAt >= 15_000;
     const embed = createBaseEmbed()
       .setTitle('🎶 Now Playing & Music Controls')
       .setDescription(`**${title}**${this.current ? `\n👤 ${this.current.info.author}\n${progress}` : ''}`)
       .addFields(
-        { name: 'Status', value: this.state, inline: true },
+        { name: 'Status', value: progressStale ? 'PLAYING • menunggu pembaruan node' : this.state, inline: true },
         { name: 'Node', value: this.player.node.name, inline: true },
         { name: 'Sumber audio', value: String(source), inline: true },
         { name: 'Antrean', value: `${this.tracks.length} lagu`, inline: true },
@@ -1453,6 +1475,14 @@ export class Queue {
     for (const channel of targets) {
       const oldMessage = this.controlMessages.get(channel.id);
       try {
+        if (!bump && oldMessage) {
+          try {
+            await oldMessage.edit({ embeds: [embed], components, allowedMentions: { parse: [] } });
+            continue;
+          } catch (error) {
+            logger.debug({ error, guildId: this.guildId, channelId: channel.id }, 'Replacing a missing music control panel');
+          }
+        }
         const newMessage = await channel.send({ embeds: [embed], components, allowedMentions: { parse: [] } });
         this.controlMessages.set(channel.id, newMessage);
         if (oldMessage && oldMessage.id !== newMessage.id) await oldMessage.delete().catch(() => null);

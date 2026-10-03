@@ -204,6 +204,99 @@ test('end watchdog does not advance a track stalled in the middle or while pause
   queue.dispose();
 });
 
+test('watchdog retains a track at 00:00 and enters recovery instead of remaining silent', async () => {
+  const { queue, player } = createQueue();
+  await queue.enqueueMany([makeTrack('one'), makeTrack('two')]);
+  const check = (queue as unknown as { checkPlaybackProgress(now: number): void }).checkPlaybackProgress.bind(queue);
+  const now = Date.now();
+  check(now + 31_000);
+  await settle(queue);
+  assert.equal(queue.state, 'RECOVERING');
+  assert.equal(queue.current?.encoded, 'one');
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['two']);
+  assert.deepEqual(player.played, ['one']);
+  queue.dispose();
+});
+
+test('watchdog fails over a silent 00:00 player to another healthy node', async () => {
+  const { queue, player, client } = createQueue();
+  const replacement = makeTrack('one-node-b');
+  client.shoukaku.nodes.set('node-a', { name: 'node-a', state: 1, sessionId: 'session-a', penalties: 0 });
+  client.shoukaku.nodes.set('node-b', { name: 'node-b', state: 1, sessionId: 'session-b', penalties: 1 });
+  client.resolveTrack = async () => ({ result: { data: replacement }, node: { name: 'node-b' } });
+  await queue.enqueueMany([makeTrack('one'), makeTrack('two')]);
+  const check = (queue as unknown as { checkPlaybackProgress(now: number): void }).checkPlaybackProgress.bind(queue);
+  check(Date.now() + 31_000);
+  await settle(queue);
+  assert.equal(player.node.name, 'node-b');
+  assert.equal(queue.current?.encoded, 'one-node-b');
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['two']);
+  assert.deepEqual(player.played, ['one', 'one-node-b']);
+  queue.dispose();
+});
+
+test('watchdog recovers a mid-track stall but does not prematurely skip it', async () => {
+  const { queue, player } = createQueue();
+  await queue.enqueueMany([makeTrack('one'), makeTrack('two')]);
+  player.position = 30_000;
+  const check = (queue as unknown as { checkPlaybackProgress(now: number): void }).checkPlaybackProgress.bind(queue);
+  const now = Date.now();
+  check(now);
+  check(now + 46_000);
+  await settle(queue);
+  assert.equal(queue.state, 'RECOVERING');
+  assert.equal(queue.current?.encoded, 'one');
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['two']);
+  queue.dispose();
+});
+
+test('watchdog advances after the expected end when Lavalink omits the end event', async () => {
+  const { queue, player } = createQueue();
+  const first = makeTrack('one');
+  const second = makeTrack('two');
+  await queue.enqueueMany([first, second]);
+  player.position = 204_000;
+  first.info.length = 244_000;
+  const check = (queue as unknown as { checkPlaybackProgress(now: number): void }).checkPlaybackProgress.bind(queue);
+  const now = Date.now();
+  check(now);
+  check(now + 51_000);
+  await settle(queue);
+  player.emit('end', { reason: 'finished', track: first });
+  await settle(queue);
+  assert.equal(queue.current?.encoded, 'two');
+  assert.deepEqual(player.played, ['one', 'two']);
+  queue.dispose();
+});
+
+test('progress refresh edits the existing panel without bumping its message', async () => {
+  const { queue, player } = createQueue();
+  await queue.enqueue(makeTrack('one'));
+  const internal = queue as unknown as {
+    panelTimer: NodeJS.Timeout | null;
+    controlMessages: Map<string, unknown>;
+    panelOperation: Promise<void>;
+    refreshProgressPanelIfDue(now?: number): void;
+    checkPlaybackProgress(now?: number): void;
+  };
+  if (internal.panelTimer) clearTimeout(internal.panelTimer);
+  internal.panelTimer = null;
+  const edits: unknown[] = [];
+  internal.controlMessages.set('text', {
+    id: 'panel',
+    edit: async (payload: unknown) => { edits.push(payload); },
+    delete: async () => undefined,
+  });
+  player.position = 42_000;
+  internal.checkPlaybackProgress(Date.now());
+  internal.refreshProgressPanelIfDue();
+  await internal.panelOperation;
+  assert.equal(edits.length, 1);
+  const payload = edits[0] as { embeds: Array<{ data: { description: string } }> };
+  assert.match(payload.embeds[0].data.description, /00:42/);
+  queue.dispose();
+});
+
 test('late finished event cannot advance the replacement selected by next', async () => {
   const { queue, player } = createQueue();
   const first = makeTrack('one');
