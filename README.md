@@ -56,7 +56,13 @@ shuffle, clear queue, filter, serta disconnect.
 
 Tombol **Lirik** mengambil lirik langsung dari LRCLIB dan mengirimkannya sebagai
 embed publik ke open chat voice channel. Lirik panjang dibagi menjadi beberapa
-halaman dan tidak ikut dihapus ketika panel diperbarui. URL API dapat diganti secara
+halaman dan tidak ikut dihapus ketika panel diperbarui. Untuk lirik non-Latin,
+bot menambahkan bacaan huruf Latin di bawah setiap baris asli. Bahasa Jepang
+dibaca menggunakan kamus lokal Kuromoji agar kanji dapat menjadi romaji;
+aksara lain memakai transliterasi Unicode lokal. Hasil otomatis dapat keliru
+untuk nama, dialek, bahasa campuran, atau aksara yang belum didukung; teks asli
+selalu dipertahankan. Pustaka lokal tersebut tidak mengirim lirik ke layanan
+romanisasi eksternal. URL API lirik dapat diganti secara
 opsional melalui:
 
 ```env
@@ -202,6 +208,21 @@ Pada log startup, pastikan daftar `configuredNodes` hanya berisi node publik.
 Ketersediaan plugin dan source manager bervariasi per operator node publik.
 
 ### Health-check deployment
+
+Setiap deploy yang mengubah `package.json` harus menyertakan `package-lock.json`
+dan menginstal ulang dependensi **di server bot**, bukan hanya di komputer lokal:
+
+```bash
+npm ci
+npm run build
+```
+
+Kemudian restart proses bot. Jika server hanya menerima folder `dist` tanpa source,
+jalankan `npm ci --omit=dev` setelah mengunggah `package.json` dan
+`package-lock.json`, lalu restart. Paket `transliteration`, `kuroshiro`, dan
+`kuroshiro-analyzer-kuromoji` dipakai untuk romanisasi lirik. Bila belum terpasang,
+bot tetap dapat memuat command dan memainkan musik; tombol Lyrics menampilkan
+lirik asli tanpa transliterasi sampai dependensi dipasang dan bot direstart.
 
 Jalankan pemeriksaan read-only berikut sebelum menyalakan bot atau setelah mengganti
 environment:

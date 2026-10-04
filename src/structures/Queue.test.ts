@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test, { after } from 'node:test';
 import { Player, Track } from 'shoukaku';
+import { ButtonStyle } from 'discord.js';
 import { Queue } from './Queue';
 import { AureliaClient } from './AureliaClient';
 import { db } from '../database/db';
@@ -847,10 +848,77 @@ test('panel controls acknowledge immediately and mutate volume, pause, seek, loo
 
   const beforeShuffle = [...queue.tracks].map((track) => track.encoded).sort();
   await run('music:shuffle');
+  assert.equal(queue.shuffleEnabled, true);
   assert.deepEqual(queue.tracks.map((track) => track.encoded).sort(), beforeShuffle);
+  const buttonStyle = () => {
+    const rows = (queue as unknown as { buildControlComponents(): Array<{ toJSON(): unknown }> })
+      .buildControlComponents();
+    const buttons = rows.flatMap((row) => (row.toJSON() as {
+      components: Array<{ custom_id?: string; style?: number }>;
+    }).components);
+    return buttons.find((button) => button.custom_id === 'music:shuffle')?.style;
+  };
+  assert.equal(buttonStyle(), ButtonStyle.Primary);
+  await queue.enqueue(makeTrack('five'));
+  assert.deepEqual(queue.tracks.map((track) => track.encoded).sort(), ['five', ...beforeShuffle].sort());
+  await run('music:shuffle');
+  assert.equal(queue.shuffleEnabled, false);
+  assert.equal(buttonStyle(), ButtonStyle.Secondary);
   await run('music:clear');
   assert.equal(queue.tracks.length, 0);
   queue.dispose();
+});
+
+test('loop button cycles one track, whole queue, then off', async () => {
+  const { queue, player, guild } = createQueue();
+  const first = makeTrack('one');
+  const second = makeTrack('two');
+  await queue.enqueueMany([first, second]);
+  const clickLoop = async () => {
+    const interaction = makeControlInteraction(guild, 'music:loop');
+    await queue.handleControlInteraction(interaction as never);
+  };
+
+  await clickLoop();
+  assert.equal(queue.loop, 'TRACK');
+  player.emit('end', { reason: 'finished', track: first });
+  await settle(queue);
+  assert.deepEqual(player.played, ['one', 'one']);
+  assert.equal(queue.current?.encoded, 'one');
+
+  await clickLoop();
+  assert.equal(queue.loop, 'QUEUE');
+  player.emit('end', { reason: 'finished', track: first });
+  await settle(queue);
+  assert.equal(queue.current?.encoded, 'two');
+  player.emit('end', { reason: 'finished', track: second });
+  await settle(queue);
+  assert.equal(queue.current?.encoded, 'one');
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['two']);
+
+  await clickLoop();
+  assert.equal(queue.loop, 'NONE');
+  player.emit('end', { reason: 'finished', track: first });
+  await settle(queue);
+  assert.equal(queue.current?.encoded, 'two');
+  assert.equal(queue.tracks.length, 0);
+  queue.dispose();
+});
+
+test('shuffle button state survives a playback session restore', async () => {
+  const original = createQueue();
+  await original.queue.enqueueMany([makeTrack('one'), makeTrack('two'), makeTrack('three')]);
+  const interaction = makeControlInteraction(original.guild, 'music:shuffle');
+  await original.queue.handleControlInteraction(interaction as never);
+  const snapshot = original.queue.toSnapshot();
+  assert.ok(snapshot);
+  assert.equal((snapshot.filters as { shuffle: boolean }).shuffle, true);
+
+  const restored = createQueue();
+  await restored.queue.restore(snapshot);
+  assert.equal(restored.queue.shuffleEnabled, true);
+  original.queue.dispose();
+  restored.queue.dispose();
 });
 
 test('manual disconnect leaves voice, removes the queue, and cancels all background timers', async () => {

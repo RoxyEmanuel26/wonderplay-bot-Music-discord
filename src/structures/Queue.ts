@@ -21,9 +21,9 @@ import { lavalinkSource } from './LavalinkNodeRanker';
 import {
   lyricsService,
   LyricsRateLimitError,
-  splitLyrics,
   stripSyncedTimestamps,
 } from '../services/LyricsService';
+import { lyricsRomanizationService } from '../services/LyricsRomanizationService';
 
 export type PlaybackState = 'PLAYING' | 'PAUSED' | 'RECOVERING' | 'IDLE';
 
@@ -52,6 +52,7 @@ export class Queue {
   public textChannel: SendableChannels;
   public guildId: string;
   public loop: 'NONE' | 'TRACK' | 'QUEUE' = 'NONE';
+  public shuffleEnabled = false;
   public state: PlaybackState = 'IDLE';
   public recoveryReason: string | null = null;
 
@@ -210,6 +211,7 @@ export class Queue {
   public enqueue(track: Track): Promise<void> {
     if (this.disposed) return Promise.resolve();
     this.tracks.push(track);
+    if (this.shuffleEnabled) this.shufflePendingTracks();
     this.queueRevision++;
     this.changed();
     this.prepareNextTrack();
@@ -219,6 +221,7 @@ export class Queue {
   public enqueueMany(tracks: Track[]): Promise<void> {
     if (this.disposed || tracks.length === 0) return Promise.resolve();
     this.tracks.push(...tracks);
+    if (this.shuffleEnabled) this.shufflePendingTracks();
     this.queueRevision++;
     this.changed();
     this.prepareNextTrack();
@@ -570,6 +573,14 @@ export class Queue {
   private pushHistory(track: Track) {
     this.history.push(track);
     if (this.history.length > 50) this.history.shift();
+  }
+
+  private shufflePendingTracks() {
+    for (let i = this.tracks.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [this.tracks[i], this.tracks[j]] = [this.tracks[j], this.tracks[i]];
+    }
+    this.preparedNext = null;
   }
 
   private isCurrentEvent(encoded: string, eventType: string, generation: number): boolean {
@@ -998,6 +1009,7 @@ export class Queue {
     this.history = [];
     this.current = null;
     this.loop = 'NONE';
+    this.shuffleEnabled = false;
     this.queueRevision++;
     this.attemptedNodes.clear();
     this.state = 'IDLE';
@@ -1079,7 +1091,7 @@ export class Queue {
       volume: Math.max(0, Math.min(100, this.player.volume)),
       paused: this.player.paused,
       positionMs: Math.max(0, this.player.position || 0),
-      filters: { preset: this.currentFilter },
+      filters: { preset: this.currentFilter, shuffle: this.shuffleEnabled },
       status: this.state === 'RECOVERING' ? 'RECOVERING' : 'ACTIVE',
     };
   }
@@ -1089,6 +1101,8 @@ export class Queue {
     this.history = snapshot.history.slice(-50);
     this.current = snapshot.current;
     this.loop = snapshot.loop;
+    this.shuffleEnabled = Boolean(snapshot.filters && typeof snapshot.filters === 'object'
+      && 'shuffle' in snapshot.filters && snapshot.filters.shuffle === true);
     this.lastNonZeroVolume = snapshot.volume || 100;
     this.currentFilter = typeof snapshot.filters === 'object' && snapshot.filters
       && 'preset' in snapshot.filters && typeof snapshot.filters.preset === 'string'
@@ -1267,14 +1281,12 @@ export class Queue {
       label = target === 0 ? 'mematikan suara' : `mengembalikan volume ke ${target}%`;
     } else if (action === 'music:shuffle') {
       await this.runExclusive(async () => {
-        for (let i = this.tracks.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [this.tracks[i], this.tracks[j]] = [this.tracks[j], this.tracks[i]];
-        }
+        this.shuffleEnabled = !this.shuffleEnabled;
+        if (this.shuffleEnabled) this.shufflePendingTracks();
         this.queueRevision++;
         this.changed();
       });
-      label = 'mengacak antrean';
+      label = this.shuffleEnabled ? 'mengaktifkan acak antrean' : 'mematikan acak antrean';
     } else if (action === 'music:clear') {
       await this.runExclusive(async () => {
         this.tracks = [];
@@ -1362,7 +1374,11 @@ export class Queue {
         return false;
       }
 
-      const pages = splitLyrics(body);
+      const formatted = lyrics.instrumental
+        ? { pages: [body], romanized: false, approximate: false }
+        : await lyricsRomanizationService.format(body, lyrics.trackName || track.info.title,
+          lyrics.artistName || track.info.author);
+      const { pages } = formatted;
       for (let index = 0; index < pages.length; index++) {
         const embed = createBaseEmbed()
           .setTitle(`📜 ${lyrics.trackName || track.info.title}`.slice(0, 256))
@@ -1371,7 +1387,7 @@ export class Queue {
             { name: 'Artis', value: (lyrics.artistName || track.info.author).slice(0, 1024), inline: true },
             { name: 'Diminta oleh', value: `<@${interaction.user.id}>`, inline: true },
           )
-          .setFooter({ text: `Sumber: LRCLIB • Halaman ${index + 1}/${pages.length}` });
+          .setFooter({ text: `Sumber: LRCLIB${formatted.romanized ? ' • Latin otomatis (bisa keliru)' : ''} • Halaman ${index + 1}/${pages.length}` });
         await voiceChannel.send({ embeds: [embed], allowedMentions: { parse: [] } });
       }
       return true;
@@ -1456,6 +1472,7 @@ export class Queue {
         { name: 'Antrean', value: `${this.tracks.length} lagu`, inline: true },
         { name: 'Volume', value: `${this.player.volume}%`, inline: true },
         { name: 'Loop', value: this.loop, inline: true },
+        { name: 'Shuffle', value: this.shuffleEnabled ? 'AKTIF' : 'MATI', inline: true },
         { name: 'Bitrate voice', value: quality, inline: true },
         ...(this.recoveryReason ? [{ name: 'Recovery', value: this.recoveryReason.slice(0, 1024) }] : []),
         { name: 'Aksi terakhir', value: action },
@@ -1515,7 +1532,8 @@ export class Queue {
         button('previous', '⏮️', this.history.length === 0),
         button('pause', '⏸️', !hasCurrent || this.player.paused),
         button('next', '⏭️', this.tracks.length === 0),
-        button('loop', '🔁', !hasCurrent, this.loop === 'NONE' ? ButtonStyle.Secondary : ButtonStyle.Primary),
+        button('loop', this.loop === 'TRACK' ? '🔂' : '🔁', !hasCurrent,
+          this.loop === 'NONE' ? ButtonStyle.Secondary : ButtonStyle.Primary),
       ),
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         button('volume-down', '🔉', this.player.volume <= 0),
@@ -1526,7 +1544,8 @@ export class Queue {
       ),
       new ActionRowBuilder<ButtonBuilder>().addComponents(
         button('mute', this.player.volume === 0 ? '🔇' : '🔈'),
-        button('shuffle', '🔀', this.tracks.length < 2),
+        button('shuffle', '🔀', !this.shuffleEnabled && this.tracks.length < 2,
+          this.shuffleEnabled ? ButtonStyle.Primary : ButtonStyle.Secondary),
         button('clear', '🗑️', this.tracks.length === 0),
         button('filter', '🎚️', !hasCurrent),
         button('disconnect', '⏹️', false, ButtonStyle.Danger),
