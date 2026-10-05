@@ -7,6 +7,7 @@ import { Queue } from './Queue';
 import { AureliaClient } from './AureliaClient';
 import { db } from '../database/db';
 import { isDiscordSnowflake, playbackSessionService } from '../services/PlaybackSessionService';
+import voiceStateUpdateEvent from '../events/voiceStateUpdate';
 
 // Queue mutasi menjadwalkan checkpoint secara otomatis. Unit test tidak boleh
 // pernah menulis snapshot guild palsu ke database yang dikonfigurasi pengguna.
@@ -28,6 +29,7 @@ class FakePlayer extends EventEmitter {
   public track: Track | null = null;
   public played: string[] = [];
   public emitCloseOnMove = false;
+  public emitCloseOnVoiceMove = false;
   public failVolume = false;
   public filterCalls: string[] = [];
   public stopCalls = 0;
@@ -46,6 +48,7 @@ class FakePlayer extends EventEmitter {
   }
   async setPaused(paused: boolean) { this.paused = paused; }
   async seekTo(position: number) { this.position = position; }
+  async sendServerUpdate() { /* Lavalink voice handshake is simulated in tests. */ }
   async clearFilters() { this.filterCalls.push('clear'); }
   async setEqualizer() { this.filterCalls.push('equalizer'); }
   async setTimescale() { this.filterCalls.push('timescale'); }
@@ -80,21 +83,41 @@ function makeTrack(encoded: string, sourceName = 'youtube', title = `Track ${enc
 function createQueue() {
   const player = new FakePlayer();
   const channel = { id: 'text', send: async () => ({ id: 'message', delete: async () => undefined }) };
-  const listener = { voice: { channelId: 'voice' } };
+  const listener = { user: { bot: false }, voice: { channelId: 'voice' } };
+  const events = new EventEmitter();
   const guild = {
+    id: 'guild',
+    shardId: 0,
     members: {
-      me: { voice: { channelId: 'voice' } },
+      me: { user: { bot: true }, voice: { channelId: 'voice' as string | null } },
       cache: new Map([['listener', listener]]),
       fetch: async () => listener,
     },
-    channels: { cache: new Map() },
+    voiceStates: { cache: new Map<string, { id: string; channelId: string | null }>() },
+    channels: { cache: new Map<string, unknown>(), fetch: async (id: string) => guild.channels.cache.get(id) || null },
   };
   let leaveCalls = 0;
+  let voiceMoveCalls = 0;
   const client = {
+    user: { id: 'bot' },
+    on: events.on.bind(events),
+    off: events.off.bind(events),
     queues: new Map(),
     shoukaku: {
       nodes: new Map(),
-      connections: new Map([['guild', { channelId: 'voice' }]]),
+      connections: new Map([['guild', { channelId: 'voice' as string | null, shardId: 0, state: 1,
+        sessionId: 'discord-session', serverUpdate: {}, connect: async () => undefined }]]),
+      connector: {
+        sendPacket: (_shardId: number, packet: { d: { channel_id: string } }) => {
+          voiceMoveCalls++;
+          if (player.emitCloseOnVoiceMove) player.emit('closed', { code: 1000, reason: '' });
+          const previous = guild.members.me.voice.channelId;
+          guild.members.me.voice.channelId = packet.d.channel_id;
+          client.shoukaku.connections.get('guild')!.channelId = packet.d.channel_id;
+          events.emit('voiceStateUpdate', { id: 'bot', guild, channelId: previous },
+            { id: 'bot', guild, channelId: packet.d.channel_id });
+        },
+      },
       leaveVoiceChannel: async () => { leaveCalls++; },
     },
     guilds: { cache: new Map([['guild', guild]]) },
@@ -115,7 +138,8 @@ function createQueue() {
     channel as never,
     'guild',
   );
-  return { queue, player, client, guild, getLeaveCalls: () => leaveCalls };
+  return { queue, player, client, guild, getLeaveCalls: () => leaveCalls,
+    getVoiceMoveCalls: () => voiceMoveCalls };
 }
 
 function makeControlInteraction(guild: unknown, customId: string, values: string[] = []) {
@@ -953,4 +977,90 @@ test('manual disconnect leaves voice, removes the queue, and cancels all backgro
     service.markDisconnecting = originalMark;
     service.delete = originalDelete;
   }
+});
+
+test('an empty old voice lets play move the same queue without losing the current song', async () => {
+  const { queue, player, client, guild, getVoiceMoveCalls, getLeaveCalls } = createQueue();
+  guild.channels.cache.set('voice-b', {
+    isVoiceBased: () => true,
+    permissionsFor: () => ({ has: () => true }),
+  });
+  await queue.enqueueMany([makeTrack('one'), makeTrack('two')]);
+  player.emitCloseOnVoiceMove = true;
+  const moved = await queue.moveToVoiceChannel('voice-b');
+  assert.equal(moved, true);
+  assert.equal(getVoiceMoveCalls(), 1);
+  assert.equal(getLeaveCalls(), 0);
+  assert.equal(guild.members.me.voice.channelId, 'voice-b');
+  assert.equal(client.shoukaku.connections.get('guild')?.channelId, 'voice-b');
+  assert.equal(queue.current?.encoded, 'one');
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['two']);
+  assert.deepEqual(player.played, ['one']);
+  assert.equal(queue.state, 'PLAYING');
+  assert.equal(await queue.moveToVoiceChannel('voice-b'), false);
+  assert.equal(getVoiceMoveCalls(), 1);
+  queue.dispose();
+});
+
+test('a listener in the old voice blocks moving the bot to another channel', async () => {
+  const { queue, guild, getVoiceMoveCalls } = createQueue();
+  guild.voiceStates.cache.set('listener', { id: 'listener', channelId: 'voice' });
+  guild.channels.cache.set('voice-b', {
+    isVoiceBased: () => true,
+    permissionsFor: () => ({ has: () => true }),
+  });
+  await queue.enqueue(makeTrack('one'));
+  await assert.rejects(queue.moveToVoiceChannel('voice-b'), /masih memiliki pendengar/);
+  assert.equal(getVoiceMoveCalls(), 0);
+  assert.equal(queue.current?.encoded, 'one');
+  assert.equal(guild.members.me.voice.channelId, 'voice');
+  queue.dispose();
+});
+
+test('the last human leaving does not disconnect or dispose the bot', async () => {
+  const { queue, client, guild, getLeaveCalls } = createQueue();
+  client.queues.set('guild', queue);
+  await queue.enqueue(makeTrack('one'));
+  guild.voiceStates.cache.delete('listener');
+  await voiceStateUpdateEvent.execute(
+    { id: 'listener', guild, channelId: 'voice' } as never,
+    { id: 'listener', guild, channelId: null } as never,
+    client as unknown as AureliaClient,
+  );
+  assert.equal(client.queues.get('guild'), queue);
+  assert.equal(queue.current?.encoded, 'one');
+  assert.equal(getLeaveCalls(), 0);
+  queue.dispose();
+});
+
+test('an unexpected voice drop rejoins without clearing the current track or queue', async () => {
+  const { queue, player, client, guild, getLeaveCalls } = createQueue();
+  client.queues.set('guild', queue);
+  guild.channels.cache.set('voice', {
+    isVoiceBased: () => true,
+    isSendable: () => false,
+    permissionsFor: () => ({ has: () => true }),
+  });
+  await queue.enqueueMany([makeTrack('one'), makeTrack('two')]);
+  guild.members.me.voice.channelId = null;
+  const connection = client.shoukaku.connections.get('guild')!;
+  connection.channelId = null;
+  connection.connect = async () => {
+    connection.channelId = 'voice';
+    connection.serverUpdate = {};
+    guild.members.me.voice.channelId = 'voice';
+  };
+  await voiceStateUpdateEvent.execute(
+    { id: 'bot', guild, channelId: 'voice' } as never,
+    { id: 'bot', guild, channelId: null } as never,
+    client as unknown as AureliaClient,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 2700));
+  assert.equal(client.queues.get('guild'), queue);
+  assert.equal(queue.current?.encoded, 'one');
+  assert.deepEqual(queue.tracks.map((track) => track.encoded), ['two']);
+  assert.deepEqual(player.played, ['one', 'one']);
+  assert.equal(queue.state, 'PLAYING');
+  assert.equal(getLeaveCalls(), 0);
+  queue.dispose();
 });

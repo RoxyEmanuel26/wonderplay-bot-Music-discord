@@ -160,6 +160,12 @@ node Lavalink siap, lalu otomatis rejoin dan melanjutkan posisi terakhir. `/stop
 hanya menghentikan musik dan membersihkan antrean; `/disconnect` adalah perintah yang
 mengeluarkan bot serta menghapus sesi.
 
+Bot tetap berada di voice meskipun tidak ada anggota lain atau antrean habis. Jika
+pengguna meminta lagu dari voice lain, bot hanya berpindah bila channel lamanya
+tidak memiliki pendengar manusia; musik dan antrean tetap dipertahankan. Jika
+masih ada pendengar, permintaan dari voice lain ditolak. Koneksi voice yang
+terputus tanpa perintah `/disconnect` dicoba sambungkan ulang ke channel terakhir.
+
 `PLAYBACK_PERSISTENCE_ENABLED` harus tetap `true` pada deployment. Test suite
 mematikannya di proses test agar guild palsu seperti `guild` tidak pernah masuk ke
 database. Saat startup, snapshot dengan guild/voice ID yang bukan Discord snowflake

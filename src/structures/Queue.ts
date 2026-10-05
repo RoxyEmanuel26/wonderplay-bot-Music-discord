@@ -11,6 +11,7 @@ import {
   SendableChannels,
   MessageFlags,
   PermissionFlagsBits,
+  VoiceState,
 } from 'discord.js';
 import { AureliaClient } from './AureliaClient';
 import { logger } from '../utils/logger';
@@ -72,6 +73,7 @@ export class Queue {
   private disconnecting = false;
   private currentFilter = 'none';
   private expectedMigrationCloseUntil = 0;
+  private expectedVoiceMoveCloseUntil = 0;
   private alternativeRecoveryAttempted = false;
   private retryablePlaybackFailure: string | null = null;
   private lastMarkedFailureGeneration = -1;
@@ -85,12 +87,17 @@ export class Queue {
   private endWatchdogGeneration = -1;
   private lastProgressPanelRefreshAt = 0;
   private readonly lyricsCooldowns = new Map<string, number>();
+  private voiceChannelId: string;
+  private voiceReconnectTimer: NodeJS.Timeout | null = null;
+  private voiceReconnectAttempt = 0;
 
   constructor(client: AureliaClient, player: Player, textChannel: SendableChannels, guildId: string) {
     this.client = client;
     this.player = player;
     this.textChannel = textChannel;
     this.guildId = guildId;
+    this.voiceChannelId = client.shoukaku.connections.get(guildId)?.channelId
+      || client.guilds.cache.get(guildId)?.members.me?.voice.channelId || '';
     const checkpointMs = Math.max(1000, Number(process.env.PLAYBACK_CHECKPOINT_INTERVAL_MS) || 5000);
     this.checkpointTimer = setInterval(() => {
       playbackSessionService.schedule(this);
@@ -198,8 +205,12 @@ export class Queue {
         }, 'Ignored expected player close emitted by a Lavalink node migration');
         return;
       }
-      if (!this.disconnecting && stillInVoice) {
-        logger.warn({ guildId: this.guildId }, 'Queue retained while Lavalink migrates or reconnects the player');
+      if (this.expectedVoiceMoveCloseUntil >= Date.now()) {
+        logger.info({ guildId: this.guildId, code: event.code }, 'Ignored expected voice websocket close during channel move');
+        return;
+      }
+      if (!this.disconnecting) {
+        logger.warn({ guildId: this.guildId, stillInVoice }, 'Queue retained while voice or Lavalink reconnects');
         this.beginRecovery(`player-closed:${event.code}`);
         return;
       }
@@ -320,6 +331,109 @@ export class Queue {
     });
   }
 
+  /** Move only when the previous voice channel has no human listeners. */
+  public moveToVoiceChannel(targetChannelId: string): Promise<boolean> {
+    let moved = false;
+    return this.runExclusive(async () => {
+      if (this.disposed || this.disconnecting) throw new Error('Sesi musik sedang ditutup.');
+      const guild = this.client.guilds.cache.get(this.guildId);
+      const connection = this.client.shoukaku.connections.get(this.guildId);
+      const currentChannelId = guild?.members.me?.voice.channelId || connection?.channelId || this.voiceChannelId;
+      if (!guild || !connection || !currentChannelId) {
+        throw new Error('Koneksi voice bot sedang dipulihkan. Coba lagi sebentar.');
+      }
+      if (currentChannelId === targetChannelId) return;
+
+      const botId = this.client.user?.id;
+      const hasListener = [...guild.voiceStates.cache.values()].some((state) =>
+        state.channelId === currentChannelId && state.id !== botId
+        // Treat an uncached member as human, so incomplete cache data cannot
+        // move a bot away from somebody who is listening.
+        && guild.members.cache.get(state.id)?.user.bot !== true);
+      if (hasListener) {
+        throw new Error(`Bot masih memiliki pendengar di <#${currentChannelId}>. Bergabunglah ke sana untuk menambahkan lagu.`);
+      }
+
+      const target = guild.channels.cache.get(targetChannelId)
+        || await guild.channels.fetch(targetChannelId).catch(() => null);
+      if (!target?.isVoiceBased()) throw new Error('Voice channel tujuan tidak tersedia.');
+      const permissions = guild.members.me && target.permissionsFor(guild.members.me);
+      if (!permissions?.has(PermissionFlagsBits.Connect) || !permissions.has(PermissionFlagsBits.Speak)) {
+        throw new Error('Bot membutuhkan izin Connect dan Speak di voice channel tujuan.');
+      }
+
+      this.expectedVoiceMoveCloseUntil = Date.now() + 12_000;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const cleanup = () => {
+            clearTimeout(timeout);
+            this.client.off('voiceStateUpdate', onVoiceStateUpdate);
+          };
+          const onVoiceStateUpdate = (_oldState: VoiceState, newState: VoiceState) => {
+            if (newState.id !== botId || newState.guild.id !== this.guildId
+              || newState.channelId !== targetChannelId) return;
+            cleanup();
+            resolve();
+          };
+          const timeout = setTimeout(() => {
+            cleanup();
+            reject(new Error('Bot tidak berhasil pindah voice dalam 10 detik. Periksa izin channel dan coba lagi.'));
+          }, 10_000);
+          this.client.on('voiceStateUpdate', onVoiceStateUpdate);
+          try {
+            // Gateway OP 4 moves the bot itself; REST setChannel would require
+            // Move Members permission even though Connect/Speak are sufficient.
+            this.client.shoukaku.connector.sendPacket(connection.shardId, {
+              op: 4,
+              d: {
+                guild_id: this.guildId,
+                channel_id: targetChannelId,
+                self_deaf: true,
+                self_mute: false,
+              },
+            }, false);
+          } catch (error) {
+            cleanup();
+            reject(error);
+          }
+        });
+      } catch (error) {
+        this.expectedVoiceMoveCloseUntil = 0;
+        throw error;
+      }
+
+      this.expectedVoiceMoveCloseUntil = Date.now() + 5000;
+      this.voiceChannelId = targetChannelId;
+      this.voiceReconnectAttempt = 0;
+      if (this.voiceReconnectTimer) clearTimeout(this.voiceReconnectTimer);
+      this.voiceReconnectTimer = null;
+      this.changed();
+      this.scheduleControlPanelRefresh(0);
+      logger.info({ guildId: this.guildId, from: currentChannelId, to: targetChannelId }, 'Bot moved to an empty voice channel request');
+      moved = true;
+    }).then(() => moved);
+  }
+
+  /** A temporary Discord voice drop must not discard a persistent queue. */
+  public handleUnexpectedVoiceDisconnect() {
+    if (this.disposed || this.disconnecting || !this.voiceChannelId) return;
+    this.beginRecovery('voice-disconnected');
+    this.scheduleVoiceReconnect(0);
+  }
+
+  public handleVoiceChannelJoined(channelId: string) {
+    if (this.disposed || this.disconnecting) return;
+    const changedChannel = this.voiceChannelId !== channelId;
+    this.voiceChannelId = channelId;
+    if (this.voiceReconnectTimer) clearTimeout(this.voiceReconnectTimer);
+    this.voiceReconnectTimer = null;
+    this.voiceReconnectAttempt = 0;
+    if (changedChannel) {
+      this.changed();
+      this.scheduleControlPanelRefresh(0);
+    }
+  }
+
   /** Keep the player on the node that produced its encoded tracks. */
   public async bindToNode(nodeName: string): Promise<boolean> {
     if (this.disposed || this.current) return false;
@@ -353,6 +467,8 @@ export class Queue {
     this.panelTimer = null;
     if (this.playbackSuccessTimer) clearTimeout(this.playbackSuccessTimer);
     this.playbackSuccessTimer = null;
+    if (this.voiceReconnectTimer) clearTimeout(this.voiceReconnectTimer);
+    this.voiceReconnectTimer = null;
     this.preparedNext = null;
     void this.deleteControlPanels();
   }
@@ -368,6 +484,95 @@ export class Queue {
   /** Queue an event-driven operation while keeping failures handled in the background. */
   private runDetached(operation: () => Promise<void>) {
     void this.runExclusive(operation).catch(() => undefined);
+  }
+
+  private scheduleVoiceReconnect(delayMs: number) {
+    if (this.disposed || this.disconnecting || this.voiceReconnectTimer) return;
+    this.voiceReconnectTimer = setTimeout(() => {
+      this.voiceReconnectTimer = null;
+      this.runDetached(() => this.reconnectVoice());
+    }, delayMs);
+  }
+
+  private async reconnectVoice() {
+    if (this.disposed || this.disconnecting) return;
+    const guild = this.client.guilds.cache.get(this.guildId);
+    if (guild?.members.me?.voice.channelId) return;
+    const connection = this.client.shoukaku.connections.get(this.guildId);
+    if (!connection || !guild || !this.voiceChannelId) {
+      this.scheduleVoiceReconnect(30_000);
+      return;
+    }
+    let channel = guild.channels.cache.get(this.voiceChannelId);
+    if (!channel) {
+      try {
+        channel = await guild.channels.fetch(this.voiceChannelId) || undefined;
+      } catch (error) {
+        logger.warn({ error, guildId: this.guildId }, 'Could not verify voice channel before rejoining');
+        this.scheduleVoiceReconnect(30_000);
+        return;
+      }
+    }
+    if (!channel?.isVoiceBased()) {
+      logger.warn({ guildId: this.guildId, voiceChannelId: this.voiceChannelId }, 'Cannot rejoin because the voice channel no longer exists');
+      return;
+    }
+    const permissions = guild.members.me && channel.permissionsFor(guild.members.me);
+    if (!permissions?.has(PermissionFlagsBits.Connect)) {
+      logger.warn({ guildId: this.guildId, voiceChannelId: this.voiceChannelId }, 'Connect permission missing; voice rejoin will retry');
+      this.scheduleVoiceReconnect(30_000);
+      return;
+    }
+    try {
+      connection.channelId = this.voiceChannelId;
+      connection.state = 3;
+      connection.sessionId = null;
+      connection.serverUpdate = null;
+      await connection.connect();
+      await this.player.sendServerUpdate(connection);
+      this.voiceReconnectAttempt = 0;
+      this.changed();
+      this.scheduleControlPanelRefresh(0);
+      logger.info({ guildId: this.guildId, voiceChannelId: this.voiceChannelId }, 'Bot rejoined voice without losing its queue');
+      if (this.current) {
+        try {
+          const position = Math.max(0, this.player.position || 0);
+          const paused = this.player.paused;
+          await this.player.playTrack({
+            track: { encoded: this.current.encoded },
+            position: Math.min(position, this.current.info.length || position),
+            paused,
+            volume: Math.min(100, this.player.volume),
+          });
+          this.playbackGeneration++;
+          this.state = paused ? 'PAUSED' : 'PLAYING';
+          this.recoveryReason = null;
+          if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+          this.recoveryTimer = null;
+          this.recoveryAttempt = 0;
+          this.resetPlaybackProgress();
+          this.changed();
+          this.scheduleControlPanelRefresh(0);
+        } catch (error) {
+          logger.warn({ error, guildId: this.guildId }, 'Stored track could not resume after voice rejoin; resolving again');
+          await this.recoverPlayback('voice-rejoined');
+        }
+      } else if (this.tracks.length) await this.playNext();
+      else {
+        this.state = 'IDLE';
+        this.recoveryReason = null;
+        if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+        this.recoveryTimer = null;
+        this.recoveryAttempt = 0;
+        this.changed();
+        this.scheduleControlPanelRefresh(0);
+      }
+    } catch (error) {
+      this.voiceReconnectAttempt++;
+      const delayMs = Math.min(30_000, 5000 * this.voiceReconnectAttempt);
+      logger.warn({ error, guildId: this.guildId, delayMs }, 'Voice rejoin failed; retry scheduled');
+      this.scheduleVoiceReconnect(delayMs);
+    }
   }
 
   /**
@@ -648,6 +853,10 @@ export class Queue {
 
   private async recoverPlayback(cause: string) {
     if (this.disposed || !this.current) return;
+    if (this.client.guilds.cache.get(this.guildId)?.members.me?.voice.channelId === null) {
+      this.handleUnexpectedVoiceDisconnect();
+      return;
+    }
 
     if (/^(?:loadFailed|exception|stuck|watchdog-stall|node-unavailable:)/.test(cause)
       && this.lastMarkedFailureGeneration !== this.playbackGeneration) {
@@ -1077,7 +1286,8 @@ export class Queue {
   public toSnapshot(): QueueSnapshot | null {
     if (this.disposed || this.disconnecting) return null;
     const voiceChannelId = this.client.shoukaku.connections.get(this.guildId)?.channelId
-      || this.client.guilds.cache.get(this.guildId)?.members.me?.voice.channelId;
+      || this.client.guilds.cache.get(this.guildId)?.members.me?.voice.channelId
+      || this.voiceChannelId;
     if (!voiceChannelId) return null;
     return {
       guildId: this.guildId,

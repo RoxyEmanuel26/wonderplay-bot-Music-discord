@@ -71,9 +71,9 @@ const playCommand: Command = {
 
     const lang = await getLanguage(ctx.guildId!);
     
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const member = ctx.member as any;
-    const voiceChannel = member?.voice?.channel;
+    const member = ctx.guild?.members.cache.get(ctx.author.id)
+      || await ctx.guild?.members.fetch(ctx.author.id).catch(() => null);
+    const voiceChannel = member?.voice.channel;
 
     if (!voiceChannel) {
       await ctx.reply({ embeds: [createErrorEmbed(t('noVoiceChannel', lang))], flags: MessageFlags.Ephemeral });
@@ -88,17 +88,6 @@ const playCommand: Command = {
 
     await runGuildPlayOperation(ctx.guildId!, async () => {
       let queue = client.queues.get(ctx.guildId!);
-      const activeVoiceChannelId = client.shoukaku?.connections.get(ctx.guildId!)?.channelId
-        || ctx.guild?.members.me?.voice.channelId;
-
-      if (queue && activeVoiceChannelId && activeVoiceChannelId !== voiceChannel.id) {
-        await ctx.followUp({
-          embeds: [createErrorEmbed(`Bot sedang digunakan di <#${activeVoiceChannelId}>. Bergabunglah ke voice channel tersebut untuk menambahkan lagu.`)],
-          flags: MessageFlags.Ephemeral,
-        });
-        return;
-      }
-
       const spotifyReference = parseSpotifyUrl(query);
       const resolved = query.startsWith('http')
         ? await client.resolveTrack(query, queue?.player.node.name, true)
@@ -137,9 +126,21 @@ const playCommand: Command = {
       const result = resolved?.result;
       const sourceNodeName = spotifyMirror?.nodeName || spotifyCollection?.nodeName || resolved?.node.name;
 
+      if (queue) {
+        try {
+          await queue.moveToVoiceChannel(voiceChannel.id);
+        } catch (error) {
+          await ctx.followUp({
+            embeds: [createErrorEmbed(error instanceof Error ? error.message : 'Gagal memeriksa voice channel bot.')],
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+      }
+
       if (!queue) {
         try {
-          const player = await client.shoukaku.joinVoiceChannel({
+          const player = await client.joinVoiceChannelSafely({
             guildId: ctx.guildId!,
             channelId: voiceChannel.id,
             shardId: ctx.guild?.shardId ?? 0,
@@ -152,8 +153,8 @@ const playCommand: Command = {
           // The source can disappear between resolve and join. Keep the voice
           // connection and let Queue re-encode/recover the track on a live node.
           if (sourceNodeName) await queue.bindToNode(sourceNodeName);
-        } catch {
-          await ctx.followUp({ embeds: [createErrorEmbed('Gagal bergabung ke saluran suara. Pastikan bot memiliki izin untuk bergabung dan berbicara di saluran tersebut.')] });
+        } catch (error) {
+          await ctx.followUp({ embeds: [createErrorEmbed(client.voiceJoinErrorMessage(error))] });
           return;
         }
       }

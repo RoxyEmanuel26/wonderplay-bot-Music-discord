@@ -17,7 +17,17 @@ const voiceStateUpdateEvent: Event<'voiceStateUpdate'> = {
     if (pending) clearTimeout(pending);
     disconnectChecks.delete(guildId);
 
-    if (newState.channelId) return;
+    if (newState.channelId) {
+      client.queues.get(guildId)?.handleVoiceChannelJoined(newState.channelId);
+      return;
+    }
+
+    logger.warn({
+      guildId,
+      previousChannelId: oldState.channelId,
+      connectionChannelId: client.shoukaku.connections.get(guildId)?.channelId,
+      hasQueue: client.queues.has(guildId),
+    }, 'Discord reported bot voice disconnect; confirming before recovery');
 
     // Discord may briefly report channel=null while voice reconnects. Confirm the
     // bot is still out before deleting a persistent queue/session.
@@ -33,12 +43,12 @@ const voiceStateUpdateEvent: Event<'voiceStateUpdate'> = {
 
         const queue = client.queues.get(guildId);
         if (queue) {
-          queue.dispose();
-          await client.shoukaku.leaveVoiceChannel(guildId).catch(() => undefined);
-          client.queues.delete(guildId);
+          queue.handleUnexpectedVoiceDisconnect();
+          logger.warn({ guildId }, 'Bot left voice unexpectedly; queue retained and voice rejoin requested');
+          return;
         }
         await playbackSessionService.delete(guildId);
-        logger.info({ guildId }, 'Confirmed external bot voice disconnect; playback session removed');
+        logger.info({ guildId }, 'Confirmed bot voice disconnect without an active queue; stale session removed');
       })().catch((error) => {
         logger.error({ error, guildId }, 'Failed to clean up confirmed bot voice disconnect');
       });

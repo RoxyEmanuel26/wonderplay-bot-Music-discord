@@ -1,9 +1,16 @@
-import { Client, Collection, GatewayIntentBits } from 'discord.js';
+import { Client, Collection, GatewayIntentBits, PermissionFlagsBits } from 'discord.js';
 import { Command } from './Command';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../utils/logger';
-import { Shoukaku, Connectors, type NodeOption, type Track } from 'shoukaku';
+import {
+  Shoukaku,
+  Connectors,
+  type NodeOption,
+  type Player,
+  type Track,
+  type VoiceChannelOptions,
+} from 'shoukaku';
 import { Queue } from './Queue';
 import { playbackSessionService } from '../services/PlaybackSessionService';
 import { LavalinkNodeRanker, lavalinkSource } from './LavalinkNodeRanker';
@@ -20,6 +27,7 @@ export class AureliaClient extends Client {
   private readonly lavalinkNodeConfigs = new Map<string, NodeOption>();
   private readonly nodeReconnectCycles = new Map<string, number>();
   private readonly nodeRanker = new LavalinkNodeRanker();
+  private readonly voiceJoinOperations = new Map<string, Promise<Player>>();
 
   constructor() {
     super({
@@ -240,6 +248,140 @@ export class AureliaClient extends Client {
       .some((node) => this.isLavalinkNodeHealthy(node.name));
   }
 
+  /**
+   * Joins Discord voice without letting an orphaned Shoukaku connection block
+   * the guild forever. Every caller for the same guild shares one operation,
+   * so simultaneous message/slash requests cannot create duplicate players.
+   */
+  public async joinVoiceChannelSafely(options: VoiceChannelOptions): Promise<Player> {
+    const pending = this.voiceJoinOperations.get(options.guildId);
+    if (pending) return pending;
+
+    const operation = this.performVoiceJoin(options);
+    this.voiceJoinOperations.set(options.guildId, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.voiceJoinOperations.get(options.guildId) === operation) {
+        this.voiceJoinOperations.delete(options.guildId);
+      }
+    }
+  }
+
+  /** Returns a useful Discord-facing explanation instead of blaming every failure on permissions. */
+  public voiceJoinErrorMessage(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/(?:missing permissions|missing access|50013|forbidden|connect permission|speak permission)/i.test(message)) {
+      return 'Bot tidak memiliki izin **Connect** dan/atau **Speak** pada voice channel tersebut. Periksa override izin channel, bukan hanya role server.';
+    }
+    if (/(?:channel is full|user limit|voice channel full)/i.test(message)) {
+      return 'Voice channel sudah penuh dan bot tidak dapat bergabung.';
+    }
+    if (/(?:voice channel is unavailable|unknown channel|10003)/i.test(message)) {
+      return 'Voice channel tujuan tidak lagi tersedia atau tidak terlihat oleh bot.';
+    }
+    if (/(?:existing connection|session|endpoint|voice connection|not established|timed? ?out|closed)/i.test(message)) {
+      return 'Koneksi voice Discord sebelumnya tidak selesai dengan benar. State lama sudah dibersihkan, tetapi handshake ulang masih gagal; coba kirim request sekali lagi.';
+    }
+    return 'Gagal bergabung ke voice channel karena koneksi Discord voice gagal. Alasan teknis lengkap sudah dicatat di console bot.';
+  }
+
+  private async performVoiceJoin(options: VoiceChannelOptions): Promise<Player> {
+    const guild = this.guilds.cache.get(options.guildId);
+    const targetChannel = guild
+      ? guild.channels.cache.get(options.channelId)
+        || await guild.channels.fetch(options.channelId).catch(() => null)
+      : null;
+    if (guild && !targetChannel?.isVoiceBased()) {
+      throw new Error('Voice channel is unavailable');
+    }
+    if (guild?.members.me && targetChannel?.isVoiceBased()) {
+      const permissions = targetChannel.permissionsFor(guild.members.me);
+      if (!permissions.has(PermissionFlagsBits.Connect)) {
+        throw new Error('Missing Connect permission');
+      }
+      if (!permissions.has(PermissionFlagsBits.Speak)) {
+        throw new Error('Missing Speak permission');
+      }
+    }
+
+    const existingConnection = this.shoukaku.connections.get(options.guildId);
+    const existingPlayer = this.shoukaku.players.get(options.guildId);
+    const botVoiceChannelId = this.guilds.cache.get(options.guildId)?.members.me?.voice.channelId;
+    const existingNodeName = existingPlayer?.node.name;
+    const connectionIsReady = Boolean(
+      existingConnection
+      && existingPlayer
+      && existingConnection.channelId === options.channelId
+      && (!botVoiceChannelId || botVoiceChannelId === options.channelId)
+      && existingConnection.state === 1
+      && existingConnection.sessionId
+      && existingConnection.serverUpdate
+      && existingNodeName
+      && this.isLavalinkNodeHealthy(existingNodeName),
+    );
+
+    if (connectionIsReady && existingPlayer) {
+      logger.info({
+        guildId: options.guildId,
+        channelId: options.channelId,
+        node: existingNodeName,
+      }, 'Menggunakan kembali koneksi voice yang masih sehat');
+      return existingPlayer;
+    }
+
+    if (existingConnection || existingPlayer) {
+      logger.warn({
+        guildId: options.guildId,
+        requestedChannelId: options.channelId,
+        discordChannelId: botVoiceChannelId,
+        connectionChannelId: existingConnection?.channelId,
+        connectionState: existingConnection?.state,
+        hasVoiceSession: Boolean(existingConnection?.sessionId),
+        hasVoiceServerUpdate: Boolean(existingConnection?.serverUpdate),
+        hasPlayer: Boolean(existingPlayer),
+        node: existingNodeName,
+      }, 'Membersihkan koneksi voice Shoukaku yang basi atau tidak lengkap');
+      await this.shoukaku.leaveVoiceChannel(options.guildId).catch((error) => {
+        logger.debug({ error, guildId: options.guildId }, 'Pembersihan koneksi voice lama mengembalikan error yang aman diabaikan');
+      });
+    }
+
+    try {
+      return await this.shoukaku.joinVoiceChannel(options);
+    } catch (firstError) {
+      if (!isRetryableVoiceJoinError(firstError)) {
+        logger.error({
+          error: firstError,
+          guildId: options.guildId,
+          channelId: options.channelId,
+          discordChannelId: botVoiceChannelId,
+        }, 'Discord voice join gagal');
+        throw firstError;
+      }
+
+      logger.warn({
+        error: firstError,
+        guildId: options.guildId,
+        channelId: options.channelId,
+      }, 'Voice join pertama gagal karena state/handshake; membersihkan state dan mencoba sekali lagi');
+      await this.shoukaku.leaveVoiceChannel(options.guildId).catch(() => undefined);
+
+      try {
+        return await this.shoukaku.joinVoiceChannel(options);
+      } catch (retryError) {
+        logger.error({
+          error: retryError,
+          firstError,
+          guildId: options.guildId,
+          channelId: options.channelId,
+          discordChannelId: this.guilds.cache.get(options.guildId)?.members.me?.voice.channelId,
+        }, 'Discord voice join tetap gagal setelah pembersihan state dan retry');
+        throw retryError;
+      }
+    }
+  }
+
   private async tryRestorePlaybackSessions() {
     if (this.restorationStarted || !this.discordReady || process.env.PLAYBACK_RECOVERY_ENABLED === 'false') return;
     if (!this.hasReadyLavalinkNode()) return;
@@ -348,4 +490,9 @@ function readIntegerEnv(name: string, fallback: number, minimum: number, maximum
   const value = Number.parseInt(process.env[name] || '', 10);
   if (!Number.isFinite(value)) return fallback;
   return Math.max(minimum, Math.min(maximum, value));
+}
+
+function isRetryableVoiceJoinError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:existing connection|session|endpoint|voice connection|not established|timed? ?out|disconnected|closed)/i.test(message);
 }

@@ -112,9 +112,9 @@ const playlistCommand: Command = {
         return;
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const member = ctx.member as any;
-      const voiceChannel = member?.voice?.channel;
+      const member = ctx.guild?.members.cache.get(ctx.author.id)
+        || await ctx.guild?.members.fetch(ctx.author.id).catch(() => null);
+      const voiceChannel = member?.voice.channel;
       if (!voiceChannel) {
         await ctx.followUp({ embeds: [createErrorEmbed('Kamu harus berada di voice channel terlebih dahulu!')] });
         return;
@@ -127,15 +127,9 @@ const playlistCommand: Command = {
       }
 
       let queue = client.queues.get(ctx.guildId!);
-      const activeVoiceChannelId = client.shoukaku.connections.get(ctx.guildId!)?.channelId
-        || ctx.guild?.members.me?.voice.channelId;
-      if (queue && activeVoiceChannelId && activeVoiceChannelId !== voiceChannel.id) {
-        await ctx.followUp({ embeds: [createErrorEmbed(`Bot sedang digunakan di <#${activeVoiceChannelId}>. Bergabunglah ke voice channel tersebut.`)] });
-        return;
-      }
       if (!queue) {
         try {
-          const player = await client.shoukaku.joinVoiceChannel({
+          const player = await client.joinVoiceChannelSafely({
             guildId: ctx.guildId!,
             channelId: voiceChannel.id,
             shardId: ctx.guild?.shardId ?? 0,
@@ -143,8 +137,8 @@ const playlistCommand: Command = {
           });
           queue = new Queue(client, player, ctx.channel as TextChannel, ctx.guildId!);
           client.queues.set(ctx.guildId!, queue);
-        } catch {
-          await ctx.followUp({ embeds: [createErrorEmbed('Gagal bergabung ke saluran suara. Periksa izin bot.')] });
+        } catch (error) {
+          await ctx.followUp({ embeds: [createErrorEmbed(client.voiceJoinErrorMessage(error))] });
           return;
         }
       }
@@ -171,6 +165,12 @@ const playlistCommand: Command = {
 
       if (loadedTracks.length === 0) {
         await ctx.followUp({ embeds: [createErrorEmbed(`Tidak ada lagu dari playlist **${name}** yang berhasil dimuat.`)] });
+        return;
+      }
+      try {
+        await queue.moveToVoiceChannel(voiceChannel.id);
+      } catch (error) {
+        await ctx.followUp({ embeds: [createErrorEmbed(error instanceof Error ? error.message : 'Gagal memeriksa voice channel bot.')] });
         return;
       }
       await queue.enqueueMany(loadedTracks);

@@ -146,7 +146,7 @@ export class PlaybackSessionService {
             continue;
           }
 
-          const player = await client.shoukaku.joinVoiceChannel({
+          const player = await client.joinVoiceChannelSafely({
             guildId: session.guildId,
             channelId: session.voiceChannelId,
             shardId: guild.shardId,

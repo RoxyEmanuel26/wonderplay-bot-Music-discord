@@ -13,7 +13,7 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "deploy": "ts-node src/scripts/deploy.ts",
     "spotify:auth": "ts-node src/scripts/spotifyAuth.ts",
-    "postinstall": "prisma skills sync || exit 0"
+    "postinstall": "prisma generate"
   },
   "keywords": [],
   "author": "",

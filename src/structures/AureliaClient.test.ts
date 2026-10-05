@@ -22,6 +22,22 @@ interface ReconnectHarness {
   compareLavalinkNodes(a: { name: string; penalties: number }, b: { name: string; penalties: number }, source?: string): number;
 }
 
+interface VoiceJoinHarness {
+  shoukaku: {
+    connections: Map<string, unknown>;
+    players: Map<string, unknown>;
+    joinVoiceChannel(options: unknown): Promise<unknown>;
+    leaveVoiceChannel(guildId: string): Promise<void>;
+  };
+  joinVoiceChannelSafely(options: {
+    guildId: string;
+    channelId: string;
+    shardId: number;
+    deaf: boolean;
+  }): Promise<unknown>;
+  voiceJoinErrorMessage(error: unknown): string;
+}
+
 function harness() {
   return new AureliaClient() as unknown as ReconnectHarness;
 }
@@ -195,4 +211,104 @@ test('resolve retries YouTube on another node and avoids the failed source on th
   assert.equal(second?.node.name, 'public-tls');
   assert.equal((first?.result.data as typeof track).pluginInfo &&
     ((first?.result.data as typeof track).pluginInfo as { encodedNode?: string }).encodedNode, 'public-tls');
+});
+
+test('voice join removes an orphaned Shoukaku connection before joining again', async () => {
+  const client = new AureliaClient() as unknown as VoiceJoinHarness;
+  const connections = new Map<string, unknown>([['guild-1', {
+    channelId: 'old-channel',
+    state: 3,
+    sessionId: null,
+    serverUpdate: null,
+  }]]);
+  const players = new Map<string, unknown>();
+  let leaveCalls = 0;
+  let joinCalls = 0;
+  const expectedPlayer = { node: { name: 'public-node' } };
+  client.shoukaku = {
+    connections,
+    players,
+    async leaveVoiceChannel(guildId) {
+      leaveCalls++;
+      connections.delete(guildId);
+      players.delete(guildId);
+    },
+    async joinVoiceChannel() {
+      joinCalls++;
+      return expectedPlayer;
+    },
+  };
+
+  const player = await client.joinVoiceChannelSafely({
+    guildId: 'guild-1', channelId: 'new-channel', shardId: 0, deaf: true,
+  });
+
+  assert.equal(player, expectedPlayer);
+  assert.equal(leaveCalls, 1);
+  assert.equal(joinCalls, 1);
+});
+
+test('voice join retries once when Shoukaku reports a stale existing connection', async () => {
+  const client = new AureliaClient() as unknown as VoiceJoinHarness;
+  const connections = new Map<string, unknown>();
+  const players = new Map<string, unknown>();
+  let leaveCalls = 0;
+  let joinCalls = 0;
+  const expectedPlayer = { node: { name: 'public-node' } };
+  client.shoukaku = {
+    connections,
+    players,
+    async leaveVoiceChannel(guildId) {
+      leaveCalls++;
+      connections.delete(guildId);
+    },
+    async joinVoiceChannel() {
+      joinCalls++;
+      if (joinCalls === 1) {
+        connections.set('guild-1', { channelId: 'stale-channel' });
+        throw new Error('This guild already have an existing connection');
+      }
+      return expectedPlayer;
+    },
+  };
+
+  const player = await client.joinVoiceChannelSafely({
+    guildId: 'guild-1', channelId: 'new-channel', shardId: 0, deaf: true,
+  });
+
+  assert.equal(player, expectedPlayer);
+  assert.equal(joinCalls, 2);
+  assert.equal(leaveCalls, 1);
+});
+
+test('simultaneous voice joins for one guild share a single Shoukaku operation', async () => {
+  const client = new AureliaClient() as unknown as VoiceJoinHarness;
+  let joinCalls = 0;
+  const expectedPlayer = { node: { name: 'public-node' } };
+  client.shoukaku = {
+    connections: new Map(),
+    players: new Map(),
+    async leaveVoiceChannel() {},
+    async joinVoiceChannel() {
+      joinCalls++;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return expectedPlayer;
+    },
+  };
+  const options = { guildId: 'guild-1', channelId: 'new-channel', shardId: 0, deaf: true };
+
+  const [first, second] = await Promise.all([
+    client.joinVoiceChannelSafely(options),
+    client.joinVoiceChannelSafely(options),
+  ]);
+
+  assert.equal(first, expectedPlayer);
+  assert.equal(second, expectedPlayer);
+  assert.equal(joinCalls, 1);
+});
+
+test('voice join error describes stale state separately from channel permissions', () => {
+  const client = new AureliaClient() as unknown as VoiceJoinHarness;
+  assert.match(client.voiceJoinErrorMessage(new Error('existing connection')), /Koneksi voice Discord sebelumnya/);
+  assert.match(client.voiceJoinErrorMessage(new Error('Missing Permissions 50013')), /Connect.*Speak/);
 });
